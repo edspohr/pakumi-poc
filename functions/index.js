@@ -97,7 +97,7 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
       if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
 
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
       const result = await model.generateContent(buildPrompt(pet, messageBody));
       reply = result.response.text();
       if (!reply || !reply.trim()) throw new Error("Empty Gemini response");

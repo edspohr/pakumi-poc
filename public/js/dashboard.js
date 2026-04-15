@@ -12,7 +12,7 @@
   const waPetName1 = document.getElementById("waPetName1");
   const waPetName2 = document.getElementById("waPetName2");
   const qrPetName = document.getElementById("qrPetName");
-  const qrCanvas = document.getElementById("qrCanvas");
+  const qrContainer = document.getElementById("qrContainer");
   const qrUrl = document.getElementById("qrUrl");
   const downloadQrBtn = document.getElementById("downloadQrBtn");
 
@@ -45,6 +45,43 @@
   signOutBtn.addEventListener("click", signOutAndRedirect);
   footerSignOutBtn.addEventListener("click", signOutAndRedirect);
 
+  function renderQr(emergencyUrl) {
+    if (typeof QRCode !== "function") {
+      console.error(
+        "[dashboard] QRCode constructor is not available — check the CDN script tag."
+      );
+      qrContainer.innerHTML =
+        '<p class="text-xs text-gray-500 text-center px-4">No se pudo generar el QR. Guarda el enlace manualmente.</p>';
+      return;
+    }
+
+    qrContainer.innerHTML = "";
+    new QRCode(qrContainer, {
+      text: emergencyUrl,
+      width: 256,
+      height: 256,
+      colorDark: "#000000",
+      colorLight: "#ffffff",
+    });
+  }
+
+  function handleDownload(petName) {
+    // Give the lib a moment to paint the <img> before we try to grab it.
+    setTimeout(() => {
+      const img = qrContainer.querySelector("img");
+      if (!img || !img.src) {
+        console.warn("[dashboard] QR image not ready yet.");
+        return;
+      }
+      const a = document.createElement("a");
+      a.href = img.src;
+      a.download = `pakumi-qr-${petName.replace(/\s+/g, "-").toLowerCase()}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }, 500);
+  }
+
   function renderPet(petId, pet) {
     const name = pet.name || "Tu mascota";
 
@@ -61,59 +98,64 @@
     const emergencyUrl = `https://pakumi-poc.web.app/emergency.html?id=${encodeURIComponent(petId)}`;
     qrUrl.textContent = emergencyUrl;
 
-    QRCode.toCanvas(
-      qrCanvas,
-      emergencyUrl,
-      {
-        width: 250,
-        margin: 2,
-        color: { dark: "#111827", light: "#ffffff" },
-      },
-      (err) => {
-        if (err) console.error("QR error", err);
-      }
-    );
-
-    downloadQrBtn.addEventListener("click", () => {
-      const dataUrl = qrCanvas.toDataURL("image/png");
-      const a = document.createElement("a");
-      a.href = dataUrl;
-      a.download = `pakumi-qr-${name.replace(/\s+/g, "-").toLowerCase()}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    });
-
+    // Show content FIRST so pet info + WhatsApp instructions always render,
+    // even if QR generation explodes.
     showContent();
+
+    try {
+      renderQr(emergencyUrl);
+    } catch (err) {
+      console.error("[dashboard] QR render failed:", err);
+      qrContainer.innerHTML =
+        '<p class="text-xs text-gray-500 text-center px-4">No se pudo generar el QR. Intenta recargar la página.</p>';
+    }
+
+    downloadQrBtn.addEventListener("click", () => handleDownload(name));
   }
 
   auth.onAuthStateChanged(async (user) => {
     if (!user) {
+      console.log("[dashboard] no auth user, redirecting to index");
       window.location.href = "index.html";
       return;
     }
 
     const petId = getPetIdFromUrl();
+    console.log("[dashboard] petId from URL:", petId, "uid:", user.uid);
+
     if (!petId) {
       showError("No se especificó una mascota. Vuelve al inicio para registrar una.");
       return;
     }
 
     try {
-      const doc = await db.collection("pets").doc(petId).get();
+      const ref = db.collection("pets").doc(petId);
+      const doc = await ref.get();
+      console.log("[dashboard] fetch result:", {
+        exists: doc.exists,
+        id: doc.id,
+        data: doc.exists ? doc.data() : null,
+      });
+
       if (!doc.exists) {
         showError("No encontramos esta mascota en tu cuenta.");
         return;
       }
       const pet = doc.data();
       if (pet.userId !== user.uid) {
+        console.warn("[dashboard] userId mismatch", {
+          docUserId: pet.userId,
+          authUid: user.uid,
+        });
         showError("No tienes permiso para ver esta mascota.");
         return;
       }
       renderPet(petId, pet);
     } catch (err) {
-      console.error(err);
-      showError("No se pudo cargar la información. Revisa tu conexión.");
+      console.error("[dashboard] fetch error:", err.code, err.message, err);
+      showError(
+        "No se pudo cargar la información. Revisa la consola del navegador para más detalle."
+      );
     }
   });
 })();

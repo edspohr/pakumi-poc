@@ -27,13 +27,10 @@
   }
 
   function toWhatsAppNumber(raw) {
-    // Strip everything except digits. wa.me expects country-code + number, no +.
+    // wa.me expects digits only (country code + number, no +).
+    // Stored phone is already in E.164 format like "+51987654321".
     const digits = (raw || "").replace(/\D/g, "");
-    if (!digits) return null;
-    // If it looks like a Chilean mobile without country code (9 + 8 digits),
-    // assume +56.
-    if (digits.length === 9 && digits.startsWith("9")) return "56" + digits;
-    return digits;
+    return digits || null;
   }
 
   function renderProfile(data) {
