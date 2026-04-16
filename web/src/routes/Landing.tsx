@@ -11,8 +11,8 @@ export default function Landing() {
   const { user, loading } = useAuth();
   const { accepted, loading: disclaimerLoading, accept } = useDisclaimer(user?.uid);
   const profileEnsured = useRef(false);
+  const redirectChecked = useRef(false);
   const [redirectTo, setRedirectTo] = useState<string | null>(null);
-  const [checkingPets, setCheckingPets] = useState(false);
 
   // Create user profile doc on first auth (auto-assigns role: 'owner').
   useEffect(() => {
@@ -23,10 +23,12 @@ export default function Landing() {
     );
   }, [user]);
 
-  // After disclaimer accepted, check if user has pets → redirect to first pet or register.
+  // After disclaimer accepted, check pets once and pick a redirect target.
+  // Using a ref (not state) so this latches exactly once per mount and does
+  // not cause an intermediate re-render that could re-trigger the effect.
   useEffect(() => {
-    if (!user || !accepted || checkingPets || redirectTo) return;
-    setCheckingPets(true);
+    if (!user || !accepted || redirectChecked.current) return;
+    redirectChecked.current = true;
     getUserPets(user.uid)
       .then((pets) => {
         if (pets.length > 0 && pets[0].id) {
@@ -35,8 +37,11 @@ export default function Landing() {
           setRedirectTo('/register');
         }
       })
-      .catch(() => setRedirectTo('/register'));
-  }, [user, accepted, checkingPets, redirectTo]);
+      .catch((err) => {
+        console.error('[Landing] getUserPets error:', err);
+        setRedirectTo('/register');
+      });
+  }, [user, accepted]);
 
   if (loading || (user && disclaimerLoading)) {
     return (
@@ -51,7 +56,7 @@ export default function Landing() {
   }
 
   if (user && accepted) {
-    // Still checking pets
+    // Pet lookup is in flight — effect fires, redirectTo will be set shortly.
     return (
       <Layout>
         <div className="text-center text-gray-500 py-12">Cargando...</div>
