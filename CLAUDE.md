@@ -10,7 +10,8 @@ Active Firebase project: **`pakumi-poc`** (see `.firebaserc`). Created fresh on 
 
 ## Stack
 
-- **Hosting**: plain static HTML/CSS/JS in `public/` served by Firebase Hosting. No build step, no framework, no bundler — edit files and refresh.
+- **Frontend (active)**: React 19 + TypeScript + Vite + Tailwind CSS v4 in `web/`. Firebase Hosting serves the built output from `web/dist`. Run `cd web && npm run dev` for local dev (Vite on port 5173).
+- **Frontend (legacy)**: static HTML/CSS/JS in `public/`. No longer served by Firebase Hosting (see `firebase.json`), but kept for reference during migration. Will be removed once React app reaches parity.
 - **Backend**: Firebase Cloud Functions in `functions/` (Node.js, JavaScript, no ESLint, no TypeScript). Entry: `functions/index.js`.
 - **DB**: Firestore (Native mode). Rules in `firestore.rules`.
 - **External APIs**: Twilio (WhatsApp webhook inbound) + Google Gemini (`@google/generative-ai`) for replies. Keys live in `functions/.env` (gitignored, loaded via `dotenv`).
@@ -20,26 +21,51 @@ Active Firebase project: **`pakumi-poc`** (see `.firebaserc`). Created fresh on 
 All from repo root unless noted.
 
 ```bash
-# Local dev — emulators (Hosting + Functions + Firestore)
-firebase emulators:start
+# --- React app (web/) ---
+cd web && npm install          # Install deps
+cd web && npm run dev          # Vite dev server (localhost:5173)
+cd web && npm run build        # Production build → web/dist/
+cd web && npx tsc --noEmit     # Type-check without emitting
 
-# Install / update functions deps
+# --- Cloud Functions ---
 cd functions && npm install
 
-# Deploy targets individually (don't "deploy all" without reason)
-firebase deploy --only hosting
+# --- Firebase ---
+firebase emulators:start       # Emulators (Hosting + Functions + Firestore)
+firebase deploy --only hosting # Deploy web/dist to Firebase Hosting
 firebase deploy --only functions
 firebase deploy --only firestore:rules
-
-# Tail deployed function logs
-firebase functions:log
-
-# Switch/verify active project
-firebase use            # show current
-firebase use pakumi-poc # set
+firebase functions:log         # Tail deployed function logs
+firebase use                   # Show current project
+firebase use pakumi-poc        # Set project
 ```
 
 No test suite, no lint config, no CI. Don't add them unless asked.
+
+## Web app structure (`web/src/`)
+
+```
+main.tsx                     Entry point
+App.tsx                      React Router (/, /register, /dashboard/:petId, /emergency/:petId)
+firebase.ts                  Modular v10 SDK init
+index.css                    Tailwind v4 theme (brand green, alert red)
+types/index.ts               Pet & EmergencyProfile interfaces
+hooks/useAuth.ts             Auth state hook: { user, loading, signOut }
+lib/firestore.ts             Firestore read/write helpers (getPet, getEmergencyProfile, registerPet)
+routes/Landing.tsx            Auth page → redirects to /register when logged in
+routes/Register.tsx           Pet form → redirects to / when not authed
+routes/Dashboard.tsx          Pet info + WhatsApp + QR → redirects to / when not authed
+routes/Emergency.tsx          Public emergency profile (NO auth required)
+components/AuthForm.tsx       Google + email/password (register/login toggle)
+components/PetForm.tsx        Pet registration with country-code phone picker
+components/QRCode.tsx         QR SVG via qrcode.react + PNG download
+components/Layout.tsx         Shared header + sign-out
+```
+
+### Routing and auth guards
+
+- `/emergency/:petId` is the **only** public route (no auth). All others redirect unauthenticated users to `/`.
+- `firebase.json` has a SPA catch-all rewrite (`** → /index.html`) so that React Router handles all paths. The `/api/whatsapp` function rewrite is listed **before** the catch-all so it still hits the Cloud Function.
 
 ## Node version mismatch (known)
 
@@ -58,9 +84,9 @@ There are **two** Firestore collections holding pet data, and this split is load
 
 ### Data flow
 
-1. User signs in + registers pet on `index.html` → writes `pets/{petId}` + `emergency_profiles/{petId}`.
-2. `dashboard.html` shows a QR code linking to `emergency.html?petId=...`.
-3. Public scanner lands on `emergency.html`, which reads `emergency_profiles/{petId}` directly from Firestore (no auth).
+1. User signs in at `/` → redirected to `/register` → registers pet → writes `pets/{petId}` + `emergency_profiles/{petId}` (batched) → redirected to `/dashboard/:petId`.
+2. `/dashboard/:petId` shows pet info, WhatsApp instructions, and a QR code linking to `/emergency/:petId`.
+3. Public scanner lands on `/emergency/:petId`, which reads `emergency_profiles/{petId}` directly from Firestore (no auth).
 4. Separately, owner messages a Twilio WhatsApp number → Twilio webhook hits a Cloud Function → function fetches pet context from Firestore, asks Gemini, replies via Twilio.
 
 The WhatsApp webhook and the web app share Firestore but are otherwise independent. Don't couple them.

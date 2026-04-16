@@ -16,7 +16,7 @@
     }
   ],
   "hosting": {
-    "public": "public",
+    "public": "web/dist",
     "ignore": [
       "firebase.json",
       "**/.*",
@@ -26,6 +26,10 @@
       {
         "source": "/api/whatsapp",
         "function": "whatsappWebhook"
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
       }
     ]
   }

@@ -2,30 +2,107 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Pet docs — owner-only read/write.
+    // ── Helpers ──────────────────────────────────────────────────
+    // Read the requesting user's role from their profile doc.
+    // Returns null if the doc doesn't exist yet (first login).
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAdmin() {
+      return request.auth != null
+             && userRole() in ['admin', 'superadmin'];
+    }
+
+    function isSuperadmin() {
+      return request.auth != null
+             && userRole() == 'superadmin';
+    }
+
+    function isElevated() {
+      return request.auth != null
+             && userRole() in ['partner', 'admin', 'superadmin'];
+    }
+
+    // ── User profiles ───────────────────────────────────────────
+    // Owner can read/write own doc.
+    // Admins and superadmins can read any user doc.
+    // Only superadmins can write other users' docs (role changes).
+    match /users/{userId} {
+      allow read: if request.auth != null
+                  && (request.auth.uid == userId || isAdmin());
+      allow create: if request.auth != null
+                    && request.auth.uid == userId;
+      allow update: if request.auth != null
+                    && (request.auth.uid == userId || isSuperadmin());
+      allow delete: if isSuperadmin();
+    }
+
+    // ── Pets ────────────────────────────────────────────────────
+    // Owner can CRUD own pets.
+    // Elevated roles (partner, admin, superadmin) can read any pet.
     match /pets/{petId} {
       allow create: if request.auth != null
                     && request.resource.data.userId == request.auth.uid;
-      allow read, update, delete: if request.auth != null
-                                  && resource.data.userId == request.auth.uid;
+      allow read: if request.auth != null
+                  && (resource.data.userId == request.auth.uid || isElevated());
+      allow update, delete: if request.auth != null
+                            && resource.data.userId == request.auth.uid;
     }
 
-    // User profile docs — owner-only.
-    match /users/{userId} {
-      allow read, write: if request.auth != null
-                         && request.auth.uid == userId;
-    }
-
-    // Public emergency profiles — world-readable, owner-only writes.
-    // Only populate this with the safe subset:
-    // name, species, age, condition, ownerPhone, ownerName.
+    // ── Emergency profiles ──────────────────────────────────────
+    // World-readable (public QR scan). Owner-only writes.
     match /emergency_profiles/{petId} {
       allow read: if true;
       allow create, update, delete: if request.auth != null
                                     && request.resource.data.userId == request.auth.uid;
     }
 
-    // Deny everything else by default.
+    // ── Conversations ─────────────────────────────────────────────
+    // Written exclusively by the Cloud Function (admin SDK, bypasses rules).
+    // No client access needed. Admins can read for debugging.
+    match /conversations/{convId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // ── Health events ──────────────────────────────────────────────
+    // Cloud Function writes via admin SDK (bypasses rules).
+    // Pet owner can read all events and create manual entries.
+    match /health_events/{petId}/events/{eventId} {
+      allow read: if request.auth != null
+                  && (get(/databases/$(database)/documents/pets/$(petId)).data.userId == request.auth.uid
+                      || isElevated());
+      allow create: if request.auth != null
+                    && get(/databases/$(database)/documents/pets/$(petId)).data.userId == request.auth.uid
+                    && request.resource.data.source == 'manual';
+      allow update, delete: if false;
+    }
+
+    // ── Reminders ────────────────────────────────────────────────
+    // Written by the Cloud Function (admin SDK).
+    // Pet owner can read/update (e.g. mark as done) their pet's reminders.
+    match /reminders/{petId}/pending/{reminderId} {
+      allow read, update: if request.auth != null
+                          && (get(/databases/$(database)/documents/pets/$(petId)).data.userId == request.auth.uid
+                              || isElevated());
+      allow create, delete: if false;
+    }
+
+    // ── Grooming records ──────────────────────────────────────────
+    // Owner can CRUD their own pet's grooming sessions.
+    // Cloud Function can also write via admin SDK (WhatsApp extraction).
+    match /grooming_records/{petId}/sessions/{sessionId} {
+      allow read: if request.auth != null
+                  && (get(/databases/$(database)/documents/pets/$(petId)).data.userId == request.auth.uid
+                      || isElevated());
+      allow create: if request.auth != null
+                    && get(/databases/$(database)/documents/pets/$(petId)).data.userId == request.auth.uid;
+      allow update, delete: if request.auth != null
+                            && get(/databases/$(database)/documents/pets/$(petId)).data.userId == request.auth.uid;
+    }
+
+    // ── Deny everything else ────────────────────────────────────
     match /{document=**} {
       allow read, write: if false;
     }
