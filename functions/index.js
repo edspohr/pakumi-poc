@@ -51,7 +51,11 @@ function twiml(message) {
 
 // ── Prompt builders ─────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a friendly, knowledgeable veterinary AI assistant called "Pakumi". You provide helpful guidance about pet health, but always remind users to consult a real veterinarian for serious concerns.`;
+const SYSTEM_PROMPT = `You are a friendly, knowledgeable veterinary AI assistant called "Pakumi". You provide helpful guidance about pet health, but always remind users to consult a real veterinarian for serious concerns.
+
+Greeting policy:
+- If this is the FIRST message in the conversation, introduce yourself briefly: "Hola [ownerName]! Soy Pakumi, tu asistente veterinario de cabecera 🐾". Then answer their question.
+- If this is a FOLLOW-UP message (there is conversation history), do NOT re-introduce yourself. Just greet casually with "Hola [ownerName]!" or skip the greeting entirely if the conversation is flowing naturally, and go straight to answering their question. Give continuity to the conversation.`;
 
 function buildPetProfile(pet) {
   return `Patient profile:
@@ -64,7 +68,7 @@ function buildPetProfile(pet) {
 - Owner: ${pet.ownerName}`;
 }
 
-function buildConversationPrompt(pet, history, summary, messageBody) {
+function buildConversationPrompt(pet, history, summary, messageBody, isFirstMessage) {
   let prompt = SYSTEM_PROMPT + "\n\n" + buildPetProfile(pet);
 
   if (summary) {
@@ -77,6 +81,12 @@ function buildConversationPrompt(pet, history, summary, messageBody) {
       const label = msg.role === "user" ? "Owner" : "Pakumi";
       prompt += `\n${label}: ${msg.content}`;
     }
+  }
+
+  if (isFirstMessage) {
+    prompt += `\n\nConversation stage: FIRST message — introduce yourself per the greeting policy.`;
+  } else {
+    prompt += `\n\nIMPORTANTE: Esta NO es la primera interacción de la conversación. NO uses saludos de apertura como 'Hola', 'Buenos días', '¡Hola!', '¿Cómo estás?' u otras fórmulas de bienvenida. Responde directamente al contenido del mensaje del usuario.`;
   }
 
   prompt += `\n\nThe owner is asking you the following question. Respond in Spanish, be concise (max 300 words), warm, and helpful. If the question suggests an emergency, strongly recommend visiting a vet immediately.
@@ -432,6 +442,7 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
     const conv = await getConversation(phone, petId);
     const existingMessages = conv ? conv.messages || [] : [];
     const existingSummary = conv ? conv.summary || "" : "";
+    const isFirstMessage = existingMessages.length === 0;
 
     // Build history: last 5 pairs (10 messages).
     const history = getLastNPairs(existingMessages, 5);
@@ -441,7 +452,13 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
     let model;
     try {
       model = getGeminiModel();
-      const prompt = buildConversationPrompt(pet, history, existingSummary, messageBody);
+      const prompt = buildConversationPrompt(
+        pet,
+        history,
+        existingSummary,
+        messageBody,
+        isFirstMessage,
+      );
       const result = await model.generateContent(prompt);
       reply = result.response.text();
       if (!reply || !reply.trim()) throw new Error("Empty Gemini response");
