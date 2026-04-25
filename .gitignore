@@ -25,3 +25,6 @@ dist/
 build/
 .vscode/
 .idea/
+
+# Backup files (e.g., from Claude Code defensive backups)
+*.bak
