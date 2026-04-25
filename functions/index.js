@@ -1,8 +1,44 @@
+/**
+ * Pakumi WhatsApp webhook — timeout architecture
+ * ──────────────────────────────────────────────
+ * Twilio's inbound webhook gives us roughly 15 seconds to return TwiML
+ * before it considers the webhook failed and the user sees nothing. Our
+ * Cloud Function timeout is the much looser default of 60s, so the binding
+ * constraint is Twilio's, not ours.
+ *
+ * Inside that 15s budget we must cover:
+ *   - Cold start (~1–3s on Gen-2 HTTPS)
+ *   - Firestore reads (pet doc + conversation doc): typically <500ms
+ *   - Gemini reply generation: variable, normally 2–6s but can spike
+ *   - TwiML serialization + response: <100ms
+ *
+ * The Gemini call is the only step that can blow the budget, so we cap it
+ * at GEMINI_REPLY_TIMEOUT_MS (8s) using AbortController + Promise.race. On
+ * timeout we return FALLBACK_REPLY (Spanish, mentions vet for emergencies)
+ * and persist the user's incoming message so the next exchange retains
+ * context (the assistant turn is left empty by design).
+ *
+ * Delivery observability: the TwiML <Message> includes a statusCallback
+ * pointing at the twilioStatusCallback endpoint (separate handler, minimal
+ * logic), which logs each Twilio status transition into the
+ * twilio_delivery_status Firestore collection for post-mortem.
+ *
+ * Status callback URL must be set via environment before deploy:
+ *   firebase functions:config:set twilio.status_callback_url=...
+ * (or as TWILIO_STATUS_CALLBACK_URL in functions/.env for emulators)
+ */
+
 const functions = require("firebase-functions/v1");
 const admin = require("firebase-admin");
+const crypto = require("crypto");
 
 admin.initializeApp();
 const db = admin.firestore();
+
+// ── Timeout / fallback budget (see header comment) ──────────────────
+const GEMINI_REPLY_TIMEOUT_MS = 8000;
+const FALLBACK_REPLY =
+  "Estoy procesando tu consulta, dame un momento más y te respondo en breve. Si es una emergencia, contacta directamente a tu veterinario.";
 
 // ── Lazy-loaded dependencies ────────────────────────────────────────
 // dotenv and @google/generative-ai are heavy at require() time.
@@ -41,12 +77,23 @@ function extractPhone(from) {
 function escapeXml(s) {
   return String(s)
     .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
 
 function twiml(message) {
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Message>${escapeXml(message)}</Message></Response>`;
+  ensureEnv();
+  const callbackUrl = process.env.TWILIO_STATUS_CALLBACK_URL || "";
+  const cbAttr = callbackUrl
+    ? ` statusCallback="${escapeXml(callbackUrl)}"`
+    : "";
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Message${cbAttr}>${escapeXml(message)}</Message></Response>`;
+}
+
+function shortHash(s) {
+  if (!s) return null;
+  return crypto.createHash("sha256").update(String(s)).digest("hex").slice(0, 16);
 }
 
 // ── Prompt builders ─────────────────────────────────────────────────
@@ -447,9 +494,15 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
     // Build history: last 5 pairs (10 messages).
     const history = getLastNPairs(existingMessages, 5);
 
-    // Call Gemini with conversation context.
+    // Call Gemini with conversation context, capped at GEMINI_REPLY_TIMEOUT_MS.
     let reply;
     let model;
+    const geminiStartedAt = Date.now();
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(
+      () => controller.abort(),
+      GEMINI_REPLY_TIMEOUT_MS,
+    );
     try {
       model = getGeminiModel();
       const prompt = buildConversationPrompt(
@@ -459,15 +512,65 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
         messageBody,
         isFirstMessage,
       );
-      const result = await model.generateContent(prompt);
+      // Belt and suspenders: pass signal to the SDK (best-effort cancel of
+      // the underlying fetch) AND race against a manual timeout so we are
+      // guaranteed to free our promise inside the budget regardless of SDK
+      // behavior.
+      const generatePromise = model.generateContent(prompt, {
+        signal: controller.signal,
+      });
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error("GEMINI_TIMEOUT")),
+          GEMINI_REPLY_TIMEOUT_MS,
+        ),
+      );
+      const result = await Promise.race([generatePromise, timeoutPromise]);
       reply = result.response.text();
       if (!reply || !reply.trim()) throw new Error("Empty Gemini response");
     } catch (err) {
+      controller.abort();
+      const isTimeout =
+        err && (err.message === "GEMINI_TIMEOUT" || err.name === "AbortError");
+      if (isTimeout) {
+        const latencyMs = Date.now() - geminiStartedAt;
+        functions.logger.warn("Gemini fallback triggered (timeout)", {
+          conversationId: conv ? conv.id : null,
+          userMessageHash: shortHash(messageBody),
+          geminiLatencyMs: latencyMs,
+          triggeredFallback: true,
+        });
+        // Persist the user message with no assistant reply so the next
+        // exchange has context (UX degradation: user must re-prompt).
+        // Future improvement tracked in docs/debt/0009-fallback-message-recovery.md.
+        const nowIso = new Date().toISOString();
+        const messagesWithUser = [
+          ...existingMessages,
+          { role: "user", content: messageBody, timestamp: nowIso },
+        ];
+        try {
+          await saveConversation(
+            conv ? conv.id : null,
+            phone,
+            petId,
+            messagesWithUser,
+            existingSummary,
+          );
+        } catch (saveErr) {
+          functions.logger.error(
+            "saveConversation failed during fallback",
+            saveErr,
+          );
+        }
+        return res.status(200).send(twiml(FALLBACK_REPLY));
+      }
       functions.logger.error("Gemini error", err);
       reply =
         "Disculpa, estoy teniendo problemas técnicos. Intenta de nuevo en unos minutos.";
       // Still return the reply — don't persist a failed exchange.
       return res.status(200).send(twiml(reply));
+    } finally {
+      clearTimeout(timeoutHandle);
     }
 
     // Append new messages.
@@ -523,5 +626,42 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
           "Disculpa, estoy teniendo problemas técnicos. Intenta de nuevo en unos minutos."
         )
       );
+  }
+});
+
+// ── Twilio status callback ──────────────────────────────────────────
+// Receives delivery state transitions (queued, sent, delivered, failed,
+// undelivered, read) for messages we returned via TwiML. Minimal logic:
+// parse, persist, ack. Always returns 200 — Twilio retries non-2xx and we
+// don't want callback failures to compound into webhook noise.
+
+exports.twilioStatusCallback = functions.https.onRequest(async (req, res) => {
+  try {
+    let body = req.body;
+    if (typeof body === "string") {
+      body = Object.fromEntries(new URLSearchParams(body));
+    } else if (Buffer.isBuffer(body)) {
+      body = Object.fromEntries(new URLSearchParams(body.toString("utf8")));
+    }
+    body = body || {};
+
+    const messageSid = body.MessageSid || null;
+    if (!messageSid) {
+      return res.status(200).send("ok");
+    }
+
+    await db.collection("twilio_delivery_status").add({
+      messageSid,
+      status: body.MessageStatus || null,
+      to: shortHash(body.To),
+      from: body.From || null,
+      errorCode: body.ErrorCode || null,
+      errorMessage: body.ErrorMessage || null,
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return res.status(200).send("ok");
+  } catch (err) {
+    functions.logger.error("twilioStatusCallback error", err);
+    return res.status(200).send("ok");
   }
 });
