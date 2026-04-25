@@ -98,3 +98,9 @@ The WhatsApp webhook and the web app share Firestore but are otherwise independe
 ## Secrets
 
 `functions/.env` holds live Gemini + Twilio credentials and is gitignored. Never commit it, never echo its contents into responses, never copy values into `functions/index.js` as literals. For production deploys, migrate these to `firebase functions:secrets:set` before going public — `.env` works for local emulators and Gen-2 HTTPS functions but is not the long-term home.
+
+## Technical debt tracking
+
+Architectural decisions live in `docs/decisions/` (ADRs) and known technical debt lives in `docs/debt/` — one numbered file per item, indexed in `docs/debt/README.md`, structured per `docs/debt/TEMPLATE.md`.
+
+At the end of each coding session, evaluate whether new technical debt was introduced or existing debt was resolved. Update `docs/debt/` accordingly with new numbered files following the `TEMPLATE.md` structure. Resolved items keep their file (mark as resolved, do not delete) for audit trail.

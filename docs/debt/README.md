@@ -1,0 +1,45 @@
+# Technical Debt Register
+
+This directory tracks known technical debt for **Pakumi**. Each item lives in
+its own numbered file so the history of a single piece of debt is auditable
+in `git log` without digging through a monolithic document.
+
+## Conventions
+
+- **Filename:** `NNNN-short-kebab-title.md` (zero-padded four-digit ID).
+- **IDs are sequential and never reused.** The next item is the next free
+  number, regardless of which items are open or resolved.
+- **Resolved items keep their file** (status flipped to `resolved`, with a
+  resolution date and a `History` entry). Do not delete — the audit trail
+  matters more than a tidy directory.
+- **Use `TEMPLATE.md`** as the starting point for any new entry. Keep the
+  structure stable so the index below stays scannable.
+- **Update this README's index** whenever an item is added, resolved, or
+  re-prioritized.
+
+## Status legend
+
+- `open` — known, not yet being worked on.
+- `in-progress` — actively being addressed.
+- `resolved` — fixed; kept for audit trail.
+- `wontfix` — explicitly accepted as permanent. Rare; needs justification in the file.
+
+## Priority legend
+
+- `high` — actively biting us, blocking a milestone, or carrying material risk.
+- `medium` — will bite us soon or under foreseeable conditions.
+- `low` — known sub-optimality with no near-term trigger.
+
+## Index
+
+| ID   | Title                                                           | Status   | Priority | Detected   | Resolved   | Owner       | Category |
+| ---- | --------------------------------------------------------------- | -------- | -------- | ---------- | ---------- | ----------- | -------- |
+| 0001 | [Vertex AI migration](./0001-vertex-ai-migration.md)            | open     | medium   | 2026-04-25 | —          | unassigned  | backend  |
+| 0002 | [Monorepo / pnpm workspaces migration](./0002-monorepo-pnpm-migration.md) | open     | low      | 2026-04-25 | —          | unassigned  | infra    |
+| 0003 | [Rich pet profile schema](./0003-rich-pet-profile-schema.md)    | open     | high     | 2026-04-25 | —          | unassigned  | data     |
+| 0004 | [No automated tests](./0004-no-automated-tests.md)              | open     | medium   | 2026-04-25 | —          | unassigned  | ops      |
+| 0005 | [Node 20 EOL on Cloud Functions](./0005-node-20-eol.md)         | open     | medium   | 2026-04-25 | —          | unassigned  | infra    |
+| 0006 | [Twilio Sandbox only](./0006-twilio-sandbox-only.md)            | open     | high     | 2026-04-25 | —          | unassigned  | product  |
+| 0007 | [No script guardrails against prod](./0007-no-script-guardrails.md) | resolved | medium   | 2026-04-25 | 2026-04-25 | Edmundo Spohr | ops    |
+| 0008 | [Emergency templates clinical validation](./0008-emergency-templates-clinical-validation.md) | open     | high     | 2026-04-25 | —          | Edmundo Spohr + clinical partner (TBD) | safety |
+| 0009 | [Fallback message recovery](./0009-fallback-message-recovery.md) | open     | medium   | 2026-04-25 | —          | unassigned  | backend  |
