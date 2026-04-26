@@ -9,6 +9,10 @@ yarn-error.log*
 .env.*
 !.env.example
 functions/.env
+# Firebase emulator secrets (defensive; not currently used, but the
+# firebase-functions/params docs reference this filename for emulator-only
+# secret material).
+functions/.secret.local
 functions/.runtimeconfig.json
 
 # Firebase

@@ -23,14 +23,27 @@
  * logic), which logs each Twilio status transition into the
  * twilio_delivery_status Firestore collection for post-mortem.
  *
- * Status callback URL must be set via environment before deploy:
- *   firebase functions:config:set twilio.status_callback_url=...
- * (or as TWILIO_STATUS_CALLBACK_URL in functions/.env for emulators)
+ * Configuration & secrets are managed via firebase-functions/params (the
+ * supported successor to the deprecated functions.config() API). See
+ * functions/.env.example for the full list. Pre-deploy flow:
+ *
+ *   1. One-time / on rotation, set the Gemini secret in Secret Manager:
+ *        firebase functions:secrets:set GEMINI_API_KEY
+ *   2. After the first deploy reveals the twilioStatusCallback URL, record
+ *      it as a non-secret param. Either let `firebase deploy` prompt
+ *      interactively, or write it to functions/.env (gitignored):
+ *        TWILIO_STATUS_CALLBACK_URL=https://us-central1-<project>.cloudfunctions.net/twilioStatusCallback
+ *   3. Re-deploy:
+ *        firebase deploy --only functions
+ *
+ * Empty TWILIO_STATUS_CALLBACK_URL is valid — it just disables the Layer A
+ * delivery-observability statusCallback attribute.
  */
 
 const functions = require("firebase-functions/v1");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
+const { defineString, defineSecret } = require("firebase-functions/params");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -40,22 +53,25 @@ const GEMINI_REPLY_TIMEOUT_MS = 8000;
 const FALLBACK_REPLY =
   "Estoy procesando tu consulta, dame un momento más y te respondo en breve. Si es una emergencia, contacta directamente a tu veterinario.";
 
-// ── Lazy-loaded dependencies ────────────────────────────────────────
-// dotenv and @google/generative-ai are heavy at require() time.
-// Defer them to first invocation so the function passes the 10s cold-start gate.
+// ── Params (firebase-functions/params) ──────────────────────────────
+// Non-secret config: resolved at deploy time, embedded in runtime env.
+const TWILIO_STATUS_CALLBACK_URL = defineString("TWILIO_STATUS_CALLBACK_URL", {
+  description:
+    "Cloud Function URL for Twilio delivery status callbacks. Empty disables Layer A observability.",
+  default: "",
+});
+// Secret: resolved at runtime from Secret Manager. Must be bound to each
+// function that consumes it via runWith({ secrets: [...] }).
+const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
 
-let _envLoaded = false;
-function ensureEnv() {
-  if (_envLoaded) return;
-  require("dotenv").config();
-  _envLoaded = true;
-}
+// ── Lazy-loaded dependencies ────────────────────────────────────────
+// @google/generative-ai is heavy at require() time. Defer to first
+// invocation so the function passes the 10s cold-start gate.
 
 let _genAI = null;
 function getGenAI() {
   if (!_genAI) {
-    ensureEnv();
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = GEMINI_API_KEY.value();
     if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
     const { GoogleGenerativeAI } = require("@google/generative-ai");
     _genAI = new GoogleGenerativeAI(apiKey);
@@ -83,8 +99,7 @@ function escapeXml(s) {
 }
 
 function twiml(message) {
-  ensureEnv();
-  const callbackUrl = process.env.TWILIO_STATUS_CALLBACK_URL || "";
+  const callbackUrl = TWILIO_STATUS_CALLBACK_URL.value() || "";
   const cbAttr = callbackUrl
     ? ` statusCallback="${escapeXml(callbackUrl)}"`
     : "";
@@ -433,7 +448,9 @@ Examples:
 const MAX_MESSAGES = 20;
 const SUMMARY_INTERVAL = 10;
 
-exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
+exports.whatsappWebhook = functions
+  .runWith({ secrets: [GEMINI_API_KEY] })
+  .https.onRequest(async (req, res) => {
   res.set("Content-Type", "text/xml");
 
   try {
