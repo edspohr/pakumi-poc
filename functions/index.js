@@ -21,11 +21,14 @@
  *
  * Multi-layer safety architecture:
  *   - Capa 1: system prompt with veterinary safety section (see SYSTEM_PROMPT).
- *   - Capa 2 (this file): post-response LLM classifier. On EMERGENCIA_*
- *     it overrides the agent reply with EMERGENCY_TEMPLATE_INLINE before
- *     TwiML is sent. Fail-open: timeout / parse / network errors leave
- *     the original reply intact and emit structured warn logs.
- *   - Capa 3 (pending C.3): regex preempt for clear emergency phrases.
+ *   - Capa 2: post-response LLM classifier with override on emergency.
+ *     Timeout: 3s, fail-open with structured logging.
+ *   - Capa 3 (this file + safety/emergency-patterns.js): regex preempt for
+ *     unambiguous emergency phrasings. Skips agent + classifier, responds
+ *     instantly with EMERGENCY_TEMPLATE_INLINE. Ultra-conservative — 7
+ *     patterns only; false positives are unacceptable. See
+ *     safety/emergency-patterns.js for the design philosophy and the
+ *     module-load self-test.
  *   - Plantillas: inline placeholder for now; refactored to a dedicated
  *     safety/ module in C.4 after clinical validation (debt 0008).
  *
@@ -55,6 +58,7 @@ const functions = require("firebase-functions/v1");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 const { defineString, defineSecret } = require("firebase-functions/params");
+const { matchEmergencyPattern } = require("./safety/emergency-patterns");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -775,6 +779,71 @@ exports.whatsappWebhook = functions
 
     // Build history: last 5 pairs (10 messages).
     const history = getLastNPairs(existingMessages, 5);
+
+    // ── Capa 3: regex preempt ────────────────────────────────────────
+    // For unambiguous emergency phrasings, skip the agent + classifier and
+    // respond immediately with the emergency template. See
+    // functions/safety/emergency-patterns.js for the pattern list and
+    // design rationale (ultra-conservative, FPs unacceptable).
+    const regexMatch = matchEmergencyPattern(messageBody);
+    if (regexMatch) {
+      functions.logger.info("safety.preempt_regex_hit", {
+        petId,
+        conversationId: conv ? conv.id : null,
+        category: regexMatch.category,
+        matchedPattern: regexMatch.matchedPattern,
+        userMessageHash: shortHash(messageBody),
+      });
+
+      // Persist to safety_classifications for unified audit trail.
+      // Fire-and-forget; the user-facing response must not wait on this.
+      db.collection("safety_classifications")
+        .add({
+          petId,
+          conversationId: conv ? conv.id : null,
+          userMessageHash: shortHash(messageBody),
+          category: regexMatch.category,
+          confidence: "high",
+          reasoning: `regex preempt: ${regexMatch.description}`,
+          classifierStatus: "preempt_regex",
+          classifierLatencyMs: 0,
+          overrideTriggered: true,
+          receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+        })
+        .catch((err) =>
+          functions.logger.warn("safety_classification.persist_failed", {
+            err: err && err.message ? err.message : String(err),
+          }),
+        );
+
+      // Save user message + placeholder assistant turn so future context
+      // reflects what actually happened. Fire-and-forget per spec; the
+      // next message arriving within milliseconds may not see this turn,
+      // which is acceptable given the rarity of the preempt path.
+      const preemptIso = new Date().toISOString();
+      const placeholder =
+        "[Pakumi: derivó a urgencia veterinaria por regex preempt]";
+      const messagesWithPreempt = [
+        ...existingMessages,
+        { role: "user", content: messageBody, timestamp: preemptIso },
+        { role: "assistant", content: placeholder, timestamp: preemptIso },
+      ];
+      saveConversation(
+        conv ? conv.id : null,
+        phone,
+        petId,
+        messagesWithPreempt,
+        existingSummary,
+      ).catch((err) =>
+        functions.logger.error("conversation.save_failed_after_preempt", {
+          err: err && err.message ? err.message : String(err),
+        }),
+      );
+
+      // Send emergency template and return — no Gemini calls beyond this.
+      return res.status(200).send(twiml(EMERGENCY_TEMPLATE_INLINE));
+    }
+    // ─── End Capa 3 ──────────────────────────────────────────────────
 
     // Call Gemini with conversation context, capped at GEMINI_REPLY_TIMEOUT_MS.
     let reply;
