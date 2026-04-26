@@ -44,3 +44,4 @@ in `git log` without digging through a monolithic document.
 | 0008 | [Emergency templates clinical validation](./0008-emergency-templates-clinical-validation.md) | open     | high     | 2026-04-25 | —          | Edmundo Spohr + clinical partner (TBD) | safety |
 | 0009 | [Fallback message recovery](./0009-fallback-message-recovery.md) | open     | medium   | 2026-04-25 | —          | unassigned  | backend  |
 | 0010 | [Unused dotenv dependency](./0010-unused-dotenv-dep.md)         | open     | low      | 2026-04-25 | —          | Edmundo Spohr | maintenance |
+| 0011 | [UTC vs Peru time skew in date inference](./0011-utc-peru-time-skew.md) | open     | medium   | 2026-04-25 | —          | Edmundo Spohr | correctness |

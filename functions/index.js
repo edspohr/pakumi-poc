@@ -248,6 +248,7 @@ const VALID_EVENT_TYPES = [
 const VALID_SEVERITIES = ["low", "medium", "high"];
 const VALID_REMINDER_TYPES = ["vaccine", "medication", "vet_visit"];
 const VALID_GROOMING_TYPES = ["bath", "haircut", "nails", "dental", "other"];
+const VALID_DATE_CONFIDENCE = ["high", "medium", "low"];
 
 function parseExtractionJSON(raw) {
   let text = (raw || "").trim();
@@ -274,7 +275,27 @@ function sanitizeEvent(evt) {
       ? evt.date
       : null;
 
-  return { type, description, severity, date };
+  // Per HC-05a: missing/invalid confidence metadata must NOT drop the event.
+  // Default to low confidence with an explanatory source so reviewers can
+  // tell "model omitted the field" apart from "model genuinely uncertain".
+  const eventDateConfidence = VALID_DATE_CONFIDENCE.includes(
+    evt.eventDateConfidence,
+  )
+    ? evt.eventDateConfidence
+    : "low";
+  const eventDateSource =
+    typeof evt.eventDateSource === "string" && evt.eventDateSource.trim()
+      ? evt.eventDateSource.trim()
+      : "campo no provisto por el modelo";
+
+  return {
+    type,
+    description,
+    severity,
+    date,
+    eventDateConfidence,
+    eventDateSource,
+  };
 }
 
 function sanitizeGrooming(g) {
@@ -313,9 +334,27 @@ function sanitizeReminder(rem) {
   return { type, description, suggestedDate };
 }
 
-async function extractHealthData(model, pet, userMessage, assistantResponse, petId) {
+async function extractHealthData(
+  model,
+  pet,
+  userMessage,
+  assistantResponse,
+  petId,
+  conversationId,
+) {
+  // Anchor "today" so Gemini can resolve implicit years and "ayer"-style
+  // relative dates. Computed in UTC; for a POC we accept the up-to-5h skew
+  // vs. Peru local time near midnight.
+  const today = new Date();
+  const todayIso = today.toISOString().slice(0, 10);
+  const currentYear = today.getUTCFullYear();
+  const yesterdayIso = new Date(today.getTime() - 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+
   const prompt = `You are a veterinary data extraction system. Analyze this veterinary conversation exchange about ${pet.name} (${pet.species}) and extract structured health data. Respond ONLY with valid JSON, no other text.
 
+Today's date: ${todayIso}
 Owner's message: "${userMessage}"
 Assistant's response: "${assistantResponse}"
 
@@ -326,7 +365,9 @@ Extract:
       "type": "symptom" | "medication" | "vaccine" | "vet_visit" | "weight" | "diet_change" | "behavior",
       "description": "brief description in Spanish",
       "severity": "low" | "medium" | "high" | null,
-      "date": "YYYY-MM-DD or null if not mentioned"
+      "date": "YYYY-MM-DD",
+      "eventDateConfidence": "high" | "medium" | "low",
+      "eventDateSource": "short Spanish explanation of how the date was determined"
     }
   ],
   "shouldRemind": {
@@ -351,18 +392,41 @@ Rules:
 - severity: "high" for emergencies/urgent symptoms, "medium" for concerning but not urgent, "low" for routine/minor.
 - Descriptions must be in Spanish.
 
-Examples:
-- "Mi perro vomitó 3 veces hoy" → events: [{type:"symptom", description:"Vómitos (3 episodios)", severity:"medium", date:null}], grooming: {type:null}
-- "Llevé a mi gato a bañar hoy en PetClean" → events: [], grooming: {type:"bath", notes:"Baño en peluquería", date:null, provider:"PetClean"}
+Rules specific to events[] and date assignment (HC-05a):
+- A single message may contain MULTIPLE distinct events with DIFFERENT dates. Each event must be paired with its OWN date based on textual proximity in the message — the date closest to an event description is the date of that event. Do NOT assign the same date to multiple distinct events unless the message explicitly says they happened on the same day.
+- Year inference: if a date is mentioned without a year, default to the current year (today is ${todayIso}, so the current year is ${currentYear}). If applying the current year would place the date in the future relative to today, assume the date is from the previous year instead (e.g., a message in January mentioning "15 de diciembre" refers to December of the previous year).
+- "eventDateConfidence":
+  * "high" — explicit date in the message ("15 de enero", "el 3 de febrero").
+  * "medium" — relative date inferred from the message ("ayer", "la semana pasada", "hace dos días").
+  * "low" — no date present in the message; in this case set "date" to today (${todayIso}).
+- "eventDateSource" must be a short Spanish string explaining the basis (e.g., "explícita: '15 de enero'", "inferida: 'ayer'", "no encontrada, default a timestamp del mensaje").
+
+Examples for events[] (multi-event date handling):
+- "Le di la vacuna el 15 de enero" → events: [{type:"vaccine", description:"Vacuna aplicada", severity:null, date:"${currentYear}-01-15", eventDateConfidence:"high", eventDateSource:"explícita: '15 de enero'"}]
+- "Le di antibióticos ayer" → events: [{type:"medication", description:"Antibióticos administrados", severity:null, date:"${yesterdayIso}", eventDateConfidence:"medium", eventDateSource:"inferida: 'ayer'"}]
+- "Le di la vacuna el 15 de enero y el desparasitante el 3 de febrero" → events: [{type:"vaccine", description:"Vacuna aplicada", severity:null, date:"${currentYear}-01-15", eventDateConfidence:"high", eventDateSource:"explícita: '15 de enero'"}, {type:"medication", description:"Desparasitante administrado", severity:null, date:"${currentYear}-02-03", eventDateConfidence:"high", eventDateSource:"explícita: '3 de febrero'"}]
+- "Mi perro está vomitando" → events: [{type:"symptom", description:"Vómitos", severity:"medium", date:"${todayIso}", eventDateConfidence:"low", eventDateSource:"no encontrada, default a timestamp del mensaje"}]
+
+Other examples (envelope shape, unchanged behavior for grooming/reminder):
+- "Llevé a mi gato a bañar hoy en PetClean" → events: [], grooming: {type:"bath", notes:"Baño en peluquería", date:"${todayIso}", provider:"PetClean"}
 - "Le cortaron las uñas y le hicieron limpieza dental" → events: [], grooming: {type:"nails", notes:"Corte de uñas y limpieza dental", date:null, provider:null}
 - "Hola, quería preguntar algo" → events: [], shouldRemind: {type:null}, grooming: {type:null}`;
 
   let parsed;
+  let rawResponseText = "";
   try {
     const result = await model.generateContent(prompt);
-    parsed = parseExtractionJSON(result.response.text());
+    rawResponseText = result.response.text();
+    parsed = parseExtractionJSON(rawResponseText);
   } catch (err) {
-    functions.logger.warn("Health data extraction failed to parse", err);
+    // Truncate raw to keep the log line bounded; full text is rarely needed
+    // and Cloud Logging caps fields anyway.
+    functions.logger.warn("Health data extraction failed to parse", {
+      error: err && err.message ? err.message : String(err),
+      rawResponseSnippet: (rawResponseText || "").slice(0, 500),
+      petId,
+      conversationId: conversationId || null,
+    });
     return;
   }
 
@@ -385,10 +449,29 @@ Examples:
       description: evt.description,
       severity: evt.severity,
       date: evt.date,
+      eventDateConfidence: evt.eventDateConfidence,
+      eventDateSource: evt.eventDateSource,
       reportedAt: now,
       source: "whatsapp",
     });
     writes++;
+
+    // Surface low-confidence date assignments so we can audit whether the
+    // model is hallucinating dates in production. Reviewable via Cloud
+    // Logging filter on jsonPayload.message="extraction.low_confidence".
+    if (evt.eventDateConfidence === "low") {
+      functions.logger.warn("extraction.low_confidence", {
+        petId,
+        conversationId: conversationId || null,
+        userMessageHash: shortHash(userMessage),
+        event: {
+          type: evt.type,
+          description: evt.description,
+          date: evt.date,
+          eventDateSource: evt.eventDateSource,
+        },
+      });
+    }
   }
 
   // ── Reminder ──
@@ -618,7 +701,7 @@ exports.whatsappWebhook = functions
     }
 
     // Persist conversation (fire-and-forget for speed, but await to be safe).
-    await saveConversation(
+    const conversationId = await saveConversation(
       conv ? conv.id : null,
       phone,
       petId,
@@ -628,7 +711,14 @@ exports.whatsappWebhook = functions
 
     // Smart extraction pipeline in background (don't block response).
     if (model) {
-      extractHealthData(model, pet, messageBody, reply, petId).catch((err) =>
+      extractHealthData(
+        model,
+        pet,
+        messageBody,
+        reply,
+        petId,
+        conversationId,
+      ).catch((err) =>
         functions.logger.error("Extraction pipeline background error", err)
       );
     }

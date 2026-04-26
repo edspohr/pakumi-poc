@@ -76,6 +76,8 @@ export interface GroomingSession {
   createdAt: Timestamp | FieldValue;
 }
 
+export type EventDateConfidence = 'high' | 'medium' | 'low';
+
 export interface HealthEvent {
   id?: string;
   type: HealthEventType;
@@ -85,4 +87,8 @@ export interface HealthEvent {
   reportedAt: Timestamp | FieldValue;
   source: 'whatsapp' | 'manual';
   notes?: string;
+  // HC-05a: present on whatsapp-extracted events written 2026-04-25 onward.
+  // Older documents and manual entries do not carry these fields.
+  eventDateConfidence?: EventDateConfidence;
+  eventDateSource?: string;
 }
