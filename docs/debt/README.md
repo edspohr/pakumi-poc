@@ -45,3 +45,5 @@ in `git log` without digging through a monolithic document.
 | 0009 | [Fallback message recovery](./0009-fallback-message-recovery.md) | open     | medium   | 2026-04-25 | —          | unassigned  | backend  |
 | 0010 | [Unused dotenv dependency](./0010-unused-dotenv-dep.md)         | open     | low      | 2026-04-25 | —          | Edmundo Spohr | maintenance |
 | 0011 | [UTC vs Peru time skew in date inference](./0011-utc-peru-time-skew.md) | open     | medium   | 2026-04-25 | —          | Edmundo Spohr | correctness |
+| 0012 | [Latency budget on summary-trigger turns](./0012-latency-budget-summary-turns.md) | open     | medium   | 2026-04-25 | —          | Edmundo Spohr | performance |
+| 0013 | [Classifier override creates history divergence](./0013-classifier-override-history-divergence.md) | open     | low      | 2026-04-25 | —          | Edmundo Spohr | data-consistency |

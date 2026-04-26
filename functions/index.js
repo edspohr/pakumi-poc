@@ -10,13 +10,24 @@
  *   - Cold start (~1–3s on Gen-2 HTTPS)
  *   - Firestore reads (pet doc + conversation doc): typically <500ms
  *   - Gemini reply generation: variable, normally 2–6s but can spike
+ *   - Capa 2 safety classifier (a second Gemini call, post-reply): ≤3s
  *   - TwiML serialization + response: <100ms
  *
- * The Gemini call is the only step that can blow the budget, so we cap it
- * at GEMINI_REPLY_TIMEOUT_MS (8s) using AbortController + Promise.race. On
- * timeout we return FALLBACK_REPLY (Spanish, mentions vet for emergencies)
- * and persist the user's incoming message so the next exchange retains
- * context (the assistant turn is left empty by design).
+ * The main reply call is capped at GEMINI_REPLY_TIMEOUT_MS (8s) and the
+ * classifier at CLASSIFIER_TIMEOUT_MS (3s), both via AbortController +
+ * Promise.race. On main-reply timeout we return FALLBACK_REPLY (Spanish,
+ * mentions vet for emergencies) and persist the user's incoming message
+ * so the next exchange retains context (assistant turn left empty).
+ *
+ * Multi-layer safety architecture:
+ *   - Capa 1: system prompt with veterinary safety section (see SYSTEM_PROMPT).
+ *   - Capa 2 (this file): post-response LLM classifier. On EMERGENCIA_*
+ *     it overrides the agent reply with EMERGENCY_TEMPLATE_INLINE before
+ *     TwiML is sent. Fail-open: timeout / parse / network errors leave
+ *     the original reply intact and emit structured warn logs.
+ *   - Capa 3 (pending C.3): regex preempt for clear emergency phrases.
+ *   - Plantillas: inline placeholder for now; refactored to a dedicated
+ *     safety/ module in C.4 after clinical validation (debt 0008).
  *
  * Delivery observability: the TwiML <Message> includes a statusCallback
  * pointing at the twilioStatusCallback endpoint (separate handler, minimal
@@ -50,8 +61,27 @@ const db = admin.firestore();
 
 // ── Timeout / fallback budget (see header comment) ──────────────────
 const GEMINI_REPLY_TIMEOUT_MS = 8000;
+const CLASSIFIER_TIMEOUT_MS = 3000; // Capa 2 classifier timeout (fail-open)
 const FALLBACK_REPLY =
   "Estoy procesando tu consulta, dame un momento más y te respondo en breve. Si es una emergencia, contacta directamente a tu veterinario.";
+
+// Capa 2 emergency override template. Single generic Spanish message; will
+// be replaced by category-specific templates from a dedicated safety/
+// module in C.4 after clinical validation (see debt 0008). Constraints:
+// no specific medical instructions, includes 🚨 for visual prominence,
+// mentions Pakumi's limit explicitly, kept under 300 chars for WhatsApp.
+const EMERGENCY_TEMPLATE_INLINE =
+  "🚨 Esto puede ser una emergencia veterinaria. Por favor lleva a tu mascota de inmediato a un veterinario o clínica de urgencia más cercana. Pakumi no puede reemplazar la atención veterinaria de emergencia. Si necesitas ayuda para encontrar una clínica de urgencia 24/7, contáctala directamente.";
+
+const VALID_SAFETY_CATEGORIES = [
+  "EMERGENCIA_RESPIRATORIA",
+  "EMERGENCIA_INTOXICACION",
+  "EMERGENCIA_TRAUMA",
+  "EMERGENCIA_NEUROLOGICA",
+  "EMERGENCIA_OBSTETRICA",
+  "URGENCIA",
+  "NORMAL",
+];
 
 // ── Params (firebase-functions/params) ──────────────────────────────
 // Non-secret config: resolved at deploy time, embedded in runtime env.
@@ -180,6 +210,134 @@ function buildConversationPrompt(pet, history, summary, messageBody, isFirstMess
 Owner's message: ${messageBody}`;
 
   return prompt;
+}
+
+// ── Capa 2: post-response safety classifier ─────────────────────────
+//
+// Runs on the happy path AFTER the agent reply is generated and BEFORE
+// TwiML is sent. Total override on EMERGENCIA_*. Fail-open contract:
+// the function NEVER throws — on timeout, parse error, or any network
+// failure, it returns category="NORMAL" with a non-"ok" status so the
+// caller leaves the original reply intact and the failure is logged.
+
+function buildClassifierPrompt(userMessage) {
+  return `Eres un clasificador de seguridad veterinaria. Tu única tarea es clasificar el mensaje del dueño de una mascota en exactamente UNA categoría. NO respondas al mensaje, NO des consejos: solo clasifica.
+
+Categorías permitidas:
+- EMERGENCIA_RESPIRATORIA: dificultad para respirar, ahogamiento, jadeo intenso, cianosis (encías azules/moradas).
+- EMERGENCIA_INTOXICACION: ingesta de chocolate, veneno, raticida, cebolla, uvas/pasas, medicamentos humanos, productos de limpieza.
+- EMERGENCIA_TRAUMA: atropello, caídas graves, fracturas, sangrado abundante o que no para, heridas profundas, vómito con sangre.
+- EMERGENCIA_NEUROLOGICA: convulsiones, pérdida de conciencia, desmayo, parálisis, no puede levantarse, desorientación severa.
+- EMERGENCIA_OBSTETRICA: complicaciones de parto, contracciones prolongadas sin nacimiento.
+- URGENCIA: preocupante pero no inmediatamente amenazante (fiebre alta, vómitos persistentes, letargia marcada, imposibilidad de orinar — recuerda que en gatos la obstrucción urinaria puede ser emergencia).
+- NORMAL: consulta no urgente, registro de evento rutinario, pregunta educativa o conversacional.
+
+Regla de conservadurismo (importante):
+- Si dudas entre una categoría EMERGENCIA_* y URGENCIA, elige URGENCIA.
+- Si dudas entre URGENCIA y NORMAL, elige URGENCIA.
+- Justificación: un falso positivo cuesta una consulta veterinaria; un falso negativo puede costar la vida del animal.
+
+Responde SOLO con JSON válido, sin markdown ni texto adicional, con esta forma EXACTA:
+{ "category": "<una de las categorías>", "confidence": "high" | "medium" | "low", "reasoning": "<≤100 caracteres en español>" }
+
+Ejemplos:
+- "Mi perro convulsiona desde hace 5 minutos" → { "category": "EMERGENCIA_NEUROLOGICA", "confidence": "high", "reasoning": "Convulsión activa de varios minutos" }
+- "Mi gato lleva 12 horas sin orinar y se queja al ir a la caja" → { "category": "URGENCIA", "confidence": "high", "reasoning": "Posible obstrucción urinaria felina" }
+- "¿Cada cuánto debo bañar a mi labrador?" → { "category": "NORMAL", "confidence": "high", "reasoning": "Pregunta educativa de cuidado" }
+- "Mi perro tose un poco después de jugar" → { "category": "URGENCIA", "confidence": "medium", "reasoning": "Tos sin más síntomas; conservar por regla" }
+
+Mensaje del dueño:
+"${userMessage}"`;
+}
+
+async function classifyEmergency(model, userMessage, conversationId, petId) {
+  const startedAt = Date.now();
+  const failOpen = (status, reasoning) => ({
+    category: "NORMAL",
+    confidence: "low",
+    reasoning,
+    latencyMs: Date.now() - startedAt,
+    status,
+  });
+
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(
+    () => controller.abort(),
+    CLASSIFIER_TIMEOUT_MS,
+  );
+
+  try {
+    const prompt = buildClassifierPrompt(userMessage);
+    const generatePromise = model.generateContent(prompt, {
+      signal: controller.signal,
+    });
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error("CLASSIFIER_TIMEOUT")),
+        CLASSIFIER_TIMEOUT_MS,
+      ),
+    );
+    const result = await Promise.race([generatePromise, timeoutPromise]);
+    const text = result.response.text();
+
+    let parsed;
+    try {
+      parsed = parseExtractionJSON(text);
+    } catch (parseErr) {
+      functions.logger.warn("safety.classifier_parse_failed", {
+        petId,
+        conversationId: conversationId || null,
+        rawSnippet: (text || "").slice(0, 300),
+        error: parseErr && parseErr.message ? parseErr.message : String(parseErr),
+      });
+      return failOpen(
+        "error",
+        `parse: ${(parseErr && parseErr.message ? parseErr.message : "unknown").slice(0, 180)}`,
+      );
+    }
+
+    const category = VALID_SAFETY_CATEGORIES.includes(parsed.category)
+      ? parsed.category
+      : "NORMAL";
+    const confidence = ["high", "medium", "low"].includes(parsed.confidence)
+      ? parsed.confidence
+      : "low";
+    const reasoning =
+      typeof parsed.reasoning === "string" && parsed.reasoning.trim()
+        ? parsed.reasoning.trim().slice(0, 200)
+        : "";
+
+    return {
+      category,
+      confidence,
+      reasoning,
+      latencyMs: Date.now() - startedAt,
+      status: "ok",
+    };
+  } catch (err) {
+    controller.abort();
+    const isTimeout =
+      err && (err.message === "CLASSIFIER_TIMEOUT" || err.name === "AbortError");
+    if (isTimeout) {
+      functions.logger.warn("safety.classifier_timeout", {
+        petId,
+        conversationId: conversationId || null,
+        timeoutMs: CLASSIFIER_TIMEOUT_MS,
+      });
+      return failOpen("timeout", "timeout");
+    }
+    functions.logger.warn("safety.classifier_error", {
+      petId,
+      conversationId: conversationId || null,
+      error: err && err.message ? err.message : String(err),
+    });
+    return failOpen(
+      "error",
+      (err && err.message ? err.message : "unknown").slice(0, 200),
+    );
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 // ── Conversation persistence ────────────────────────────────────────
@@ -747,7 +905,52 @@ exports.whatsappWebhook = functions
       );
     }
 
-    return res.status(200).send(twiml(reply));
+    // ── Capa 2: post-response safety classifier ─────────────────────
+    // Awaited (blocks TwiML response). Fail-open: on timeout/error the
+    // original `reply` is sent through unchanged. Persist of the
+    // classification record is fire-and-forget.
+    let finalReply = reply;
+    if (model) {
+      const classification = await classifyEmergency(
+        model,
+        messageBody,
+        conversationId,
+        petId,
+      );
+
+      db.collection("safety_classifications")
+        .add({
+          petId,
+          conversationId: conversationId || null,
+          userMessageHash: shortHash(messageBody),
+          category: classification.category,
+          confidence: classification.confidence,
+          reasoning: classification.reasoning,
+          classifierStatus: classification.status,
+          classifierLatencyMs: classification.latencyMs,
+          overrideTriggered:
+            classification.category.startsWith("EMERGENCIA_"),
+          receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+        })
+        .catch((err) =>
+          functions.logger.warn("safety_classification.persist_failed", {
+            err: err && err.message ? err.message : String(err),
+          }),
+        );
+
+      if (classification.category.startsWith("EMERGENCIA_")) {
+        finalReply = EMERGENCY_TEMPLATE_INLINE;
+        functions.logger.info("safety.emergency_override", {
+          petId,
+          conversationId: conversationId || null,
+          category: classification.category,
+          confidence: classification.confidence,
+          classifierLatencyMs: classification.latencyMs,
+        });
+      }
+    }
+
+    return res.status(200).send(twiml(finalReply));
   } catch (err) {
     functions.logger.error("Webhook error", err);
     return res
