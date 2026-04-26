@@ -112,3 +112,68 @@ Hito 3 cannot proceed.
   0008 for the emergency-templates work scheduled in Bloque C.4 of the
   weekend plan. Status `open`, priority `high` from inception because the
   gap is a known Hito 3 blocker.
+- **2026-04-25** — Anexo agregado con 5 instrucciones específicas
+  consideradas y excluidas durante C.4 (ver sección al final del
+  archivo). Input directo para la futura conversación con el partner
+  clínico.
+
+---
+
+### Anexo: Información médica específica considerada y NO incluida (2026-04-25)
+
+Durante la implementación de C.4 (`functions/safety/emergency-templates.js`,
+commit pendiente), las siguientes instrucciones específicas fueron
+consideradas y deliberadamente excluidas hasta validación clínica.
+Esta lista es input directo para la conversación con el partner
+veterinario cuando esta deuda se aborde:
+
+**EMERGENCIA_INTOXICACION:**
+- Considerado: "no induzcas vómito"
+- Razón de exclusión: error contra-indicativo común que vale la pena
+  prevenir, pero la decisión "inducir vs no inducir vómito" depende del
+  tóxico específico, tiempo desde ingestión y especie. Requiere lógica
+  clínica que excede plantilla genérica.
+- Pregunta para partner clínico: ¿hay un subset de tóxicos donde "no
+  inducir vómito" sea universalmente correcto y se pueda mencionar?
+
+**EMERGENCIA_TRAUMA:**
+- Considerado: "si hay sangrado, aplica presión limpia"
+- Razón de exclusión: "aplica presión" es instrucción médica explícita,
+  bloqueada por self-test de plantillas (palabra prohibida).
+- Pregunta para partner clínico: ¿debería incluirse first-aid básico
+  para sangrado externo? ¿Cómo distinguir cuándo SÍ aplicar presión
+  (heridas externas) vs cuándo NO (potencial fractura abierta)?
+
+**EMERGENCIA_NEUROLOGICA:**
+- Considerado: "intenta cronometrar la duración del episodio"
+- Razón de exclusión: limítrofe — observación pasiva vs instrucción
+  clínica. Versión incluida es softer: "Si tienes registro del momento
+  en que comenzó, compártelo con el veterinario."
+- Pregunta para partner clínico: ¿la observación de duración es
+  información que un dueño puede registrar sin riesgo? ¿Vale la pena
+  ser más explícito sobre cronometrar?
+
+**EMERGENCIA_OBSTETRICA:**
+- Considerado: "si el cachorro está atorado, no lo extraigas tú"
+- Razón de exclusión: instrucción específica que un veterinario debería
+  dar telefónicamente caso por caso, no una plantilla genérica.
+- Pregunta para partner clínico: ¿hay protocolo escrito de "qué NO
+  hacer" en distocia que pueda incluirse?
+
+**EMERGENCIA_RESPIRATORIA:**
+- Considerado: "verifica si las encías están azules o moradas (cianosis)"
+- Razón de exclusión: observación clínica que ayuda al veterinario en
+  triaje telefónico, pero la versión actual no la incluye por
+  conservadurismo.
+- Pregunta para partner clínico: ¿las observaciones de signos vitales
+  visibles (color de encías, ritmo respiratorio) son seguras de
+  instruir a dueños? Probablemente sí — es candidato fuerte para
+  inclusión post-validación.
+
+---
+
+Cuando el partner clínico esté engaged, esta lista debe ser revisada
+ítem por ítem para decidir incorporación. Las plantillas aprobadas
+luego deben pasar el self-test de palabras prohibidas — si la
+incorporación genera necesidad de relajar ese guard, esa decisión
+también requiere sign-off clínico.

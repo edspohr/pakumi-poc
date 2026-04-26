@@ -25,12 +25,13 @@
  *     Timeout: 3s, fail-open with structured logging.
  *   - Capa 3 (this file + safety/emergency-patterns.js): regex preempt for
  *     unambiguous emergency phrasings. Skips agent + classifier, responds
- *     instantly with EMERGENCY_TEMPLATE_INLINE. Ultra-conservative — 7
- *     patterns only; false positives are unacceptable. See
- *     safety/emergency-patterns.js for the design philosophy and the
- *     module-load self-test.
- *   - Plantillas: inline placeholder for now; refactored to a dedicated
- *     safety/ module in C.4 after clinical validation (debt 0008).
+ *     instantly. Ultra-conservative — 7 patterns only; false positives
+ *     are unacceptable. See safety/emergency-patterns.js for the design
+ *     philosophy and the module-load self-test.
+ *   - Plantillas: category-specific templates in
+ *     safety/emergency-templates.js (one per EMERGENCIA_* category plus
+ *     URGENCIA). Clinically generic — process guidance only, no medical
+ *     instructions — pending clinical validation per debt 0008.
  *
  * Delivery observability: the TwiML <Message> includes a statusCallback
  * pointing at the twilioStatusCallback endpoint (separate handler, minimal
@@ -59,6 +60,7 @@ const admin = require("firebase-admin");
 const crypto = require("crypto");
 const { defineString, defineSecret } = require("firebase-functions/params");
 const { matchEmergencyPattern } = require("./safety/emergency-patterns");
+const { getEmergencyTemplate } = require("./safety/emergency-templates");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -68,14 +70,6 @@ const GEMINI_REPLY_TIMEOUT_MS = 8000;
 const CLASSIFIER_TIMEOUT_MS = 3000; // Capa 2 classifier timeout (fail-open)
 const FALLBACK_REPLY =
   "Estoy procesando tu consulta, dame un momento más y te respondo en breve. Si es una emergencia, contacta directamente a tu veterinario.";
-
-// Capa 2 emergency override template. Single generic Spanish message; will
-// be replaced by category-specific templates from a dedicated safety/
-// module in C.4 after clinical validation (see debt 0008). Constraints:
-// no specific medical instructions, includes 🚨 for visual prominence,
-// mentions Pakumi's limit explicitly, kept under 300 chars for WhatsApp.
-const EMERGENCY_TEMPLATE_INLINE =
-  "🚨 Esto puede ser una emergencia veterinaria. Por favor lleva a tu mascota de inmediato a un veterinario o clínica de urgencia más cercana. Pakumi no puede reemplazar la atención veterinaria de emergencia. Si necesitas ayuda para encontrar una clínica de urgencia 24/7, contáctala directamente.";
 
 const VALID_SAFETY_CATEGORIES = [
   "EMERGENCIA_RESPIRATORIA",
@@ -841,7 +835,9 @@ exports.whatsappWebhook = functions
       );
 
       // Send emergency template and return — no Gemini calls beyond this.
-      return res.status(200).send(twiml(EMERGENCY_TEMPLATE_INLINE));
+      return res
+        .status(200)
+        .send(twiml(getEmergencyTemplate(regexMatch.category)));
     }
     // ─── End Capa 3 ──────────────────────────────────────────────────
 
@@ -1008,7 +1004,7 @@ exports.whatsappWebhook = functions
         );
 
       if (classification.category.startsWith("EMERGENCIA_")) {
-        finalReply = EMERGENCY_TEMPLATE_INLINE;
+        finalReply = getEmergencyTemplate(classification.category);
         functions.logger.info("safety.emergency_override", {
           petId,
           conversationId: conversationId || null,
