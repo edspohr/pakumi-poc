@@ -113,7 +113,7 @@ function shortHash(s) {
 
 // ── Prompt builders ─────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a friendly, knowledgeable veterinary AI assistant called "Pakumi". You provide helpful guidance about pet health, but always remind users to consult a real veterinarian for serious concerns.
+const SYSTEM_PROMPT = `You are a friendly, knowledgeable veterinary AI assistant called "Pakumi". You provide helpful guidance about pet health within the limits and rules defined in the '### Seguridad veterinaria' section below.
 
 ### Seguridad veterinaria
 
