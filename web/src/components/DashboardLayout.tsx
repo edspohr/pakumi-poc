@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Outlet, NavLink, Navigate, Link, useParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { useDisclaimer } from '../hooks/useDisclaimer';
 import { getPet } from '../lib/firestore';
 import { PetSelector } from './PetSelector';
 import { Disclaimer } from './Disclaimer';
@@ -32,15 +31,14 @@ function bottomNavCls({ isActive }: { isActive: boolean }): string {
 export default function DashboardLayout() {
   const { petId } = useParams<{ petId: string }>();
   const { user, loading: authLoading, signOut } = useAuth();
-  const { accepted, loading: disclaimerLoading } = useDisclaimer(user?.uid);
   const [pet, setPet] = useState<Pet | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showPolicy, setShowPolicy] = useState(false);
 
   useEffect(() => {
-    if (authLoading || disclaimerLoading) return;
-    if (!user || !accepted || !petId) {
+    if (authLoading) return;
+    if (!user || !petId) {
       setLoading(false);
       return;
     }
@@ -60,10 +58,10 @@ export default function DashboardLayout() {
         setError('No se pudo cargar la información.');
       })
       .finally(() => setLoading(false));
-  }, [petId, user, authLoading, accepted, disclaimerLoading]);
+  }, [petId, user, authLoading]);
 
   // Auth guards
-  if (authLoading || (user && disclaimerLoading)) {
+  if (authLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <p className="text-gray-500">Cargando...</p>
@@ -71,7 +69,7 @@ export default function DashboardLayout() {
     );
   }
 
-  if (!user || !accepted) {
+  if (!user) {
     return <Navigate to="/" replace />;
   }
 

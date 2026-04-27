@@ -37,7 +37,12 @@ export async function ensureUserProfile(
     role: 'owner',
     createdAt: serverTimestamp(),
   };
-  await setDoc(doc(db, 'users', uid), profile);
+  // Use merge: true so a late-firing ensureUserProfile call never clobbers
+  // fields written by other codepaths (e.g. acceptedDisclaimer from the
+  // disclaimer modal, which may have resolved first under StrictMode double-
+  // mount). The initial fields here are only the base identity; they should
+  // be set if absent but must not overwrite anything else.
+  await setDoc(doc(db, 'users', uid), profile, { merge: true });
   return profile;
 }
 

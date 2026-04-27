@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { registerPet } from '../lib/firestore';
+import { ensureUserProfile, registerPet } from '../lib/firestore';
 import type { Pet } from '../types';
 
 const COUNTRY_CODES = [
@@ -95,6 +95,15 @@ export function PetForm() {
 
     setLoading(true);
     try {
+      // Ensure the user profile doc exists before writing the pet — this is
+      // where we'd previously create it on Landing. Keeps the users/{uid}
+      // doc alive for RBAC and (later) the disclaimer flag.
+      await ensureUserProfile(
+        user.uid,
+        user.email || '',
+        user.displayName || undefined,
+      );
+
       const age = ageFromBirthDate(birthDate);
       const petId = await registerPet({
         userId: user.uid,
