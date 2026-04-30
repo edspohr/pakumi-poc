@@ -1,75 +1,58 @@
 /**
- * Pakumi WhatsApp webhook — async response architecture
- * ─────────────────────────────────────────────────────
- * Inbound flow: Twilio HTTP webhook → ack-fast 200 OK with empty
- * <Response/> → in-handler async pipeline → outbound messages.create
- * REST call back to the user. The 15s Twilio webhook timeout (which
- * was the binding latency constraint in the prior synchronous TwiML
- * architecture) no longer applies to user-visible reply latency. See
- * docs/debt/0017-twilio-async-pattern.md for the migration rationale.
+ * Pakumi WhatsApp webhook — timeout architecture
+ * ──────────────────────────────────────────────
+ * Twilio's inbound webhook gives us roughly 15 seconds to return TwiML
+ * before it considers the webhook failed and the user sees nothing. Our
+ * Cloud Function timeout is the much looser default of 60s, so the binding
+ * constraint is Twilio's, not ours.
  *
- * Why await-after-send rather than detached fire-and-forget:
- *   Cloud Functions Gen-1 may reap the function instance once the
- *   handler returns. Detached promises started after res.send() can
- *   be silently dropped. Awaiting inside the same handler keeps the
- *   instance alive while still flushing the webhook ack first, which
- *   gives us the same observable property (fast ack, async-feeling
- *   reply) without the reaping risk. See debt 0017 §"Pattern choice".
+ * Inside that 15s budget we must cover:
+ *   - Cold start (~1–3s on Gen-2 HTTPS)
+ *   - Firestore reads (pet doc + conversation doc): typically <500ms
+ *   - Gemini reply generation: variable, normally 2–6s but can spike
+ *   - Capa 2 safety classifier (a second Gemini call, post-reply): ≤3s
+ *   - TwiML serialization + response: <100ms
  *
- * Latency budget — informational, no longer a hard ceiling:
- *   - Webhook ack: ~100–500ms (synchronous res.send before the await).
- *   - Gemini reply generation: variable, normally 2–6s, can spike.
- *   - Capa 2 safety classifier (post-reply): ≤2.5s, fail-open.
- *   - Twilio messages.create: usually 200–600ms; retried 3× on
- *     network errors and 5xx (1s/2s/4s exponential backoff).
+ * The main reply call is capped at GEMINI_REPLY_TIMEOUT_MS (12s) and the
+ * classifier at CLASSIFIER_TIMEOUT_MS (2.5s), both via AbortController +
+ * Promise.race. On main-reply timeout we return FALLBACK_REPLY (Spanish,
+ * mentions vet for emergencies) and persist the user's incoming message
+ * so the next exchange retains context (assistant turn left empty).
  *
- * Intermediate "still thinking" message:
- *   If the Gemini main reply has not returned within 5s of starting,
- *   we send "Estoy procesando tu consulta. Te respondo en un
- *   momento..." via messages.create, fire-and-forget at the
- *   message level (the main flow is not blocked on it). The
- *   intermediate is suppressed for the Capa 3 regex-preempt path
- *   because that short-circuits before the Gemini call. It is NOT
- *   suppressed for Capa 2 emergency overrides — by the time Capa 2
- *   runs the intermediate may already have fired; the user receives
- *   [intermediate] → [emergency template], which is acceptable
- *   (correct safety guidance, just preceded by a reassurance). See
- *   debt 0017 §"Capa 2 + intermediate ordering".
- *
- * Caps still in place as guardrails:
- *   - GEMINI_REPLY_TIMEOUT_MS (12s) — main reply hard cap.
- *   - CLASSIFIER_TIMEOUT_MS (2.5s) — Capa 2 hard cap, fail-open.
- *   - Cloud Function timeout: Gen-1 default 60s.
- *
- * Multi-layer safety architecture (unchanged):
- *   - Capa 1: system prompt with veterinary safety section
- *     (see SYSTEM_PROMPT).
- *   - Capa 2: post-response LLM classifier with override on
- *     emergency. Timeout: 2.5s, fail-open with structured logging.
- *   - Capa 3 (this file + safety/emergency-patterns.js): regex
- *     preempt for unambiguous emergency phrasings. Skips agent +
- *     classifier, responds instantly. Ultra-conservative — false
- *     positives unacceptable.
+ * Multi-layer safety architecture:
+ *   - Capa 1: system prompt with veterinary safety section (see SYSTEM_PROMPT).
+ *   - Capa 2: post-response LLM classifier with override on emergency.
+ *     Timeout: 2.5s, fail-open with structured logging.
+ *   - Capa 3 (this file + safety/emergency-patterns.js): regex preempt for
+ *     unambiguous emergency phrasings. Skips agent + classifier, responds
+ *     instantly. Ultra-conservative — 7 patterns only; false positives
+ *     are unacceptable. See safety/emergency-patterns.js for the design
+ *     philosophy and the module-load self-test.
  *   - Plantillas: category-specific templates in
- *     safety/emergency-templates.js. Pending clinical validation
- *     per debt 0008.
+ *     safety/emergency-templates.js (one per EMERGENCIA_* category plus
+ *     URGENCIA). Clinically generic — process guidance only, no medical
+ *     instructions — pending clinical validation per debt 0008.
  *
- * Delivery observability: each outbound messages.create includes a
- * statusCallback pointing at TWILIO_STATUS_CALLBACK_URL when set;
- * the twilioStatusCallback handler logs status transitions into the
- * twilio_delivery_status Firestore collection. Empty URL disables
- * the statusCallback attribute (Layer A observability off).
+ * Delivery observability: the TwiML <Message> includes a statusCallback
+ * pointing at the twilioStatusCallback endpoint (separate handler, minimal
+ * logic), which logs each Twilio status transition into the
+ * twilio_delivery_status Firestore collection for post-mortem.
  *
- * Configuration & secrets via firebase-functions/params. Required
- * secrets (set once per environment via Secret Manager):
- *   firebase functions:secrets:set GEMINI_API_KEY
- *   firebase functions:secrets:set TWILIO_ACCOUNT_SID
- *   firebase functions:secrets:set TWILIO_AUTH_TOKEN
- *   firebase functions:secrets:set TWILIO_FROM_NUMBER
- * (TWILIO_FROM_NUMBER must include the "whatsapp:" prefix, e.g.
- * "whatsapp:+14155238886".) Optional non-secret param:
- *   TWILIO_STATUS_CALLBACK_URL — set in functions/.env after first
- *   deploy reveals the function URL. Empty disables Layer A.
+ * Configuration & secrets are managed via firebase-functions/params (the
+ * supported successor to the deprecated functions.config() API). See
+ * functions/.env.example for the full list. Pre-deploy flow:
+ *
+ *   1. One-time / on rotation, set the Gemini secret in Secret Manager:
+ *        firebase functions:secrets:set GEMINI_API_KEY
+ *   2. After the first deploy reveals the twilioStatusCallback URL, record
+ *      it as a non-secret param. Either let `firebase deploy` prompt
+ *      interactively, or write it to functions/.env (gitignored):
+ *        TWILIO_STATUS_CALLBACK_URL=https://us-central1-<project>.cloudfunctions.net/twilioStatusCallback
+ *   3. Re-deploy:
+ *        firebase deploy --only functions
+ *
+ * Empty TWILIO_STATUS_CALLBACK_URL is valid — it just disables the Layer A
+ * delivery-observability statusCallback attribute.
  */
 
 const functions = require("firebase-functions/v1");
@@ -85,26 +68,8 @@ const db = admin.firestore();
 // ── Timeout / fallback budget (see header comment) ──────────────────
 const GEMINI_REPLY_TIMEOUT_MS = 12000;
 const CLASSIFIER_TIMEOUT_MS = 2500; // Capa 2 classifier timeout (fail-open)
-
-// Sent on any pipeline-internal failure that prevents delivering a real
-// reply (Gemini timeout, Gemini error, top-level catch). Softened from
-// the previous "problemas técnicos" wording per debt 0017.
-const SOFT_FALLBACK_REPLY =
-  "Lo siento, no pude procesar tu mensaje a tiempo. Por favor, ¿puedes repetirlo? Si era urgente, contacta directo a tu veterinario.";
-
-// "Still thinking" message fired when Gemini main reply has not
-// completed within INTERMEDIATE_THRESHOLD_MS of starting.
-const INTERMEDIATE_REPLY =
-  "Estoy procesando tu consulta, te respondo en un momento...";
-const INTERMEDIATE_THRESHOLD_MS = 5000;
-
-// Outbound replies travel via messages.create now, so the inbound
-// webhook only ever returns this empty TwiML envelope as its ack.
-const EMPTY_TWIML_RESPONSE =
-  '<?xml version="1.0" encoding="UTF-8"?>\n<Response/>';
-
-// messages.create retry policy — see sendWhatsAppWithRetry().
-const TWILIO_RETRY_DELAYS_MS = [1000, 2000, 4000];
+const FALLBACK_REPLY =
+  "Estoy procesando tu consulta, dame un momento más y te respondo en breve. Si es una emergencia, contacta directamente a tu veterinario.";
 
 const VALID_SAFETY_CATEGORIES = [
   "EMERGENCIA_RESPIRATORIA",
@@ -123,13 +88,9 @@ const TWILIO_STATUS_CALLBACK_URL = defineString("TWILIO_STATUS_CALLBACK_URL", {
     "Cloud Function URL for Twilio delivery status callbacks. Empty disables Layer A observability.",
   default: "",
 });
-// Secrets: resolved at runtime from Secret Manager. Must be bound to
-// each function that consumes them via runWith({ secrets: [...] }).
+// Secret: resolved at runtime from Secret Manager. Must be bound to each
+// function that consumes it via runWith({ secrets: [...] }).
 const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
-const TWILIO_ACCOUNT_SID = defineSecret("TWILIO_ACCOUNT_SID");
-const TWILIO_AUTH_TOKEN = defineSecret("TWILIO_AUTH_TOKEN");
-// Must include the "whatsapp:" prefix (e.g. "whatsapp:+14155238886").
-const TWILIO_FROM_NUMBER = defineSecret("TWILIO_FROM_NUMBER");
 
 // ── Lazy-loaded dependencies ────────────────────────────────────────
 // @google/generative-ai is heavy at require() time. Defer to first
@@ -150,25 +111,6 @@ function getGeminiModel() {
   return getGenAI().getGenerativeModel({ model: "gemini-2.5-flash" });
 }
 
-// Lazy-loaded for the same cold-start reason as @google/generative-ai
-// above (see :96-97). Initialized on first invocation, then memoized
-// for the lifetime of the function instance.
-let _twilioClient = null;
-function getTwilioClient() {
-  if (!_twilioClient) {
-    const sid = TWILIO_ACCOUNT_SID.value();
-    const token = TWILIO_AUTH_TOKEN.value();
-    if (!sid || !token) {
-      throw new Error(
-        "TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set",
-      );
-    }
-    const twilio = require("twilio");
-    _twilioClient = twilio(sid, token);
-  }
-  return _twilioClient;
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────
 
 function extractPhone(from) {
@@ -176,106 +118,25 @@ function extractPhone(from) {
   return String(from).replace(/^whatsapp:/i, "").trim();
 }
 
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function twiml(message) {
+  const callbackUrl = TWILIO_STATUS_CALLBACK_URL.value() || "";
+  const cbAttr = callbackUrl
+    ? ` statusCallback="${escapeXml(callbackUrl)}"`
+    : "";
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Message${cbAttr}>${escapeXml(message)}</Message></Response>`;
+}
+
 function shortHash(s) {
   if (!s) return null;
   return crypto.createHash("sha256").update(String(s)).digest("hex").slice(0, 16);
-}
-
-// ── Outbound delivery (Twilio messages.create) ──────────────────────
-//
-// Retry contract: at most TWILIO_RETRY_DELAYS_MS.length retries (3 by
-// default, so up to 4 total attempts), with exponential backoff between
-// attempts. We retry on:
-//   - Network errors (no HTTP response — err.status undefined)
-//   - 5xx responses from Twilio
-// We do NOT retry on 4xx — those are client errors (bad number, invalid
-// auth, exceeded daily limit) where retrying just burns budget.
-//
-// Throws on final failure so callers can decide whether to log+continue
-// or bubble up. The high-level wrapper sendWhatsAppMessage swallows the
-// throw and logs structured, since the function-level ack to Twilio has
-// already happened and there is no point cascading the failure further.
-
-async function sendWhatsAppWithRetry(params) {
-  let lastErr;
-  for (let attempt = 0; attempt <= TWILIO_RETRY_DELAYS_MS.length; attempt++) {
-    try {
-      return await getTwilioClient().messages.create(params);
-    } catch (err) {
-      lastErr = err;
-      const httpStatus =
-        err && typeof err.status === "number" ? err.status : null;
-      const isRetryable = httpStatus === null || httpStatus >= 500;
-      const isLastAttempt = attempt === TWILIO_RETRY_DELAYS_MS.length;
-      if (!isRetryable || isLastAttempt) throw err;
-      const delayMs = TWILIO_RETRY_DELAYS_MS[attempt];
-      functions.logger.warn("twilio.send_retry", {
-        attempt: attempt + 1,
-        willRetryAfterMs: delayMs,
-        httpStatus,
-        twilioCode: err && err.code ? err.code : null,
-        errMessage: err && err.message ? err.message.slice(0, 200) : null,
-      });
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastErr;
-}
-
-/**
- * Send a WhatsApp message via Twilio messages.create with retries and
- * structured logging. Never throws — on final failure logs and returns
- * null so the surrounding pipeline keeps going.
- *
- * @param {Object} opts
- * @param {string} opts.toPhone        Recipient phone, "+51..." (no "whatsapp:" prefix)
- * @param {string} opts.body           Message body
- * @param {string} [opts.conversationId]
- * @param {string} [opts.petId]
- * @param {string} [opts.userMessageHash]
- * @returns {Promise<Object|null>}     Twilio message instance on success, null on failure
- */
-async function sendWhatsAppMessage(opts) {
-  const { toPhone, body, conversationId, petId, userMessageHash } = opts;
-  const fromNumber = TWILIO_FROM_NUMBER.value();
-  if (!fromNumber) {
-    functions.logger.error("twilio.from_number_missing", {
-      petId: petId || null,
-      conversationId: conversationId || null,
-    });
-    return null;
-  }
-  const callbackUrl = TWILIO_STATUS_CALLBACK_URL.value() || "";
-  const params = {
-    from: fromNumber,
-    to: `whatsapp:${toPhone}`,
-    body,
-  };
-  if (callbackUrl) params.statusCallback = callbackUrl;
-
-  try {
-    const message = await sendWhatsAppWithRetry(params);
-    functions.logger.info("twilio.send_ok", {
-      messageSid: message && message.sid ? message.sid : null,
-      to: shortHash(toPhone),
-      petId: petId || null,
-      conversationId: conversationId || null,
-      bodyLen: body ? body.length : 0,
-    });
-    return message;
-  } catch (err) {
-    functions.logger.error("twilio.send_failed_after_retries", {
-      to: shortHash(toPhone),
-      petId: petId || null,
-      conversationId: conversationId || null,
-      userMessageHash: userMessageHash || null,
-      replyPreview: (body || "").slice(0, 200),
-      httpStatus: err && typeof err.status === "number" ? err.status : null,
-      twilioCode: err && err.code ? err.code : null,
-      errMessage: err && err.message ? err.message.slice(0, 300) : null,
-    });
-    return null;
-  }
 }
 
 // ── Prompt builders ─────────────────────────────────────────────────
@@ -850,27 +711,39 @@ Other examples (envelope shape, unchanged behavior for grooming/reminder):
 const MAX_MESSAGES = 20;
 const SUMMARY_INTERVAL = 10;
 
-/**
- * Run the full reply pipeline (Capa 3 → Gemini main → Capa 2 → delivery)
- * for a parsed Twilio inbound body. Awaited from the webhook handler
- * AFTER the 200 OK ack has been flushed; see header note for why we use
- * await-after-send rather than detached fire-and-forget.
- *
- * Never throws — top-level catch attempts a soft-fallback delivery if
- * we still have a recipient phone, then resolves.
- */
-async function processAndRespond(body) {
-  const from = body.From;
-  const messageBody = body.Body;
-  const phone = extractPhone(from);
-  const userMessageHash = shortHash(messageBody);
-
-  functions.logger.info("Incoming WhatsApp", {
-    phone,
-    profileName: body.ProfileName,
-  });
+exports.whatsappWebhook = functions
+  .runWith({ secrets: [GEMINI_API_KEY] })
+  .https.onRequest(async (req, res) => {
+  res.set("Content-Type", "text/xml");
 
   try {
+    let body = req.body;
+    if (typeof body === "string") {
+      body = Object.fromEntries(new URLSearchParams(body));
+    } else if (Buffer.isBuffer(body)) {
+      body = Object.fromEntries(new URLSearchParams(body.toString("utf8")));
+    }
+    body = body || {};
+
+    const from = body.From;
+    const messageBody = body.Body;
+
+    if (!from || !messageBody) {
+      functions.logger.warn("Missing From or Body", {
+        hasFrom: !!from,
+        hasBody: !!messageBody,
+      });
+      return res
+        .status(200)
+        .send(twiml("No recibimos tu mensaje correctamente. Intenta de nuevo."));
+    }
+
+    const phone = extractPhone(from);
+    functions.logger.info("Incoming WhatsApp", {
+      phone,
+      profileName: body.ProfileName,
+    });
+
     // Find the pet for this phone number.
     const petSnap = await db
       .collection("pets")
@@ -879,13 +752,13 @@ async function processAndRespond(body) {
       .get();
 
     if (petSnap.empty) {
-      await sendWhatsAppMessage({
-        toPhone: phone,
-        body:
-          "No encontramos una mascota registrada con este número. Regístrate en pakumi-poc.web.app para comenzar.",
-        userMessageHash,
-      });
-      return;
+      return res
+        .status(200)
+        .send(
+          twiml(
+            "No encontramos una mascota registrada con este número. Regístrate en pakumi-poc.web.app para comenzar."
+          )
+        );
     }
 
     const petDoc = petSnap.docs[0];
@@ -894,7 +767,6 @@ async function processAndRespond(body) {
 
     // Load existing conversation.
     const conv = await getConversation(phone, petId);
-    const conversationIdForLog = conv ? conv.id : null;
     const existingMessages = conv ? conv.messages || [] : [];
     const existingSummary = conv ? conv.summary || "" : "";
     const isFirstMessage = existingMessages.length === 0;
@@ -903,28 +775,27 @@ async function processAndRespond(body) {
     const history = getLastNPairs(existingMessages, 5);
 
     // ── Capa 3: regex preempt ────────────────────────────────────────
-    // For unambiguous emergency phrasings, skip the agent + classifier
-    // and respond immediately with the emergency template. The
-    // intermediate "still thinking" message is suppressed on this path
-    // because we never start the Gemini call (see header note on
-    // intermediate suppression).
+    // For unambiguous emergency phrasings, skip the agent + classifier and
+    // respond immediately with the emergency template. See
+    // functions/safety/emergency-patterns.js for the pattern list and
+    // design rationale (ultra-conservative, FPs unacceptable).
     const regexMatch = matchEmergencyPattern(messageBody);
     if (regexMatch) {
       functions.logger.info("safety.preempt_regex_hit", {
         petId,
-        conversationId: conversationIdForLog,
+        conversationId: conv ? conv.id : null,
         category: regexMatch.category,
         matchedPattern: regexMatch.matchedPattern,
-        userMessageHash,
+        userMessageHash: shortHash(messageBody),
       });
 
       // Persist to safety_classifications for unified audit trail.
-      // Fire-and-forget — the user-facing response must not wait on it.
+      // Fire-and-forget; the user-facing response must not wait on this.
       db.collection("safety_classifications")
         .add({
           petId,
-          conversationId: conversationIdForLog,
-          userMessageHash,
+          conversationId: conv ? conv.id : null,
+          userMessageHash: shortHash(messageBody),
           category: regexMatch.category,
           confidence: "high",
           reasoning: `regex preempt: ${regexMatch.description}`,
@@ -940,7 +811,9 @@ async function processAndRespond(body) {
         );
 
       // Save user message + placeholder assistant turn so future context
-      // reflects what actually happened. Fire-and-forget per spec.
+      // reflects what actually happened. Fire-and-forget per spec; the
+      // next message arriving within milliseconds may not see this turn,
+      // which is acceptable given the rarity of the preempt path.
       const preemptIso = new Date().toISOString();
       const placeholder =
         "[Pakumi: derivó a urgencia veterinaria por regex preempt]";
@@ -961,56 +834,22 @@ async function processAndRespond(body) {
         }),
       );
 
-      await sendWhatsAppMessage({
-        toPhone: phone,
-        body: getEmergencyTemplate(regexMatch.category),
-        conversationId: conversationIdForLog,
-        petId,
-        userMessageHash,
-      });
-      return;
+      // Send emergency template and return — no Gemini calls beyond this.
+      return res
+        .status(200)
+        .send(twiml(getEmergencyTemplate(regexMatch.category)));
     }
     // ─── End Capa 3 ──────────────────────────────────────────────────
 
-    // Call Gemini with conversation context, capped at
-    // GEMINI_REPLY_TIMEOUT_MS. While the call is in flight, race a 5s
-    // intermediate "still thinking" message — sent only if Gemini has
-    // not returned by then.
+    // Call Gemini with conversation context, capped at GEMINI_REPLY_TIMEOUT_MS.
     let reply;
     let model;
-    let intermediateSent = false;
-    let geminiDone = false;
     const geminiStartedAt = Date.now();
     const controller = new AbortController();
-    const hardTimeoutHandle = setTimeout(
+    const timeoutHandle = setTimeout(
       () => controller.abort(),
       GEMINI_REPLY_TIMEOUT_MS,
     );
-    const intermediateTimerHandle = setTimeout(() => {
-      if (geminiDone) return;
-      intermediateSent = true;
-      functions.logger.info("intermediate.fired", {
-        petId,
-        conversationId: conversationIdForLog,
-        userMessageHash,
-        thresholdMs: INTERMEDIATE_THRESHOLD_MS,
-      });
-      // Fire-and-forget at the message level. sendWhatsAppMessage never
-      // throws (it logs on final retry failure), so no .catch needed,
-      // but we keep one defensively in case the future shape changes.
-      sendWhatsAppMessage({
-        toPhone: phone,
-        body: INTERMEDIATE_REPLY,
-        conversationId: conversationIdForLog,
-        petId,
-        userMessageHash,
-      }).catch((err) =>
-        functions.logger.warn("intermediate.send_failed", {
-          err: err && err.message ? err.message : String(err),
-        }),
-      );
-    }, INTERMEDIATE_THRESHOLD_MS);
-
     try {
       model = getGeminiModel();
       const prompt = buildConversationPrompt(
@@ -1020,9 +859,9 @@ async function processAndRespond(body) {
         messageBody,
         isFirstMessage,
       );
-      // Belt and suspenders: pass signal to the SDK (best-effort cancel
-      // of the underlying fetch) AND race against a manual timeout so
-      // we always free the promise inside the budget regardless of SDK
+      // Belt and suspenders: pass signal to the SDK (best-effort cancel of
+      // the underlying fetch) AND race against a manual timeout so we are
+      // guaranteed to free our promise inside the budget regardless of SDK
       // behavior.
       const generatePromise = model.generateContent(prompt, {
         signal: controller.signal,
@@ -1039,20 +878,18 @@ async function processAndRespond(body) {
     } catch (err) {
       controller.abort();
       const isTimeout =
-        err &&
-        (err.message === "GEMINI_TIMEOUT" || err.name === "AbortError");
+        err && (err.message === "GEMINI_TIMEOUT" || err.name === "AbortError");
       if (isTimeout) {
         const latencyMs = Date.now() - geminiStartedAt;
         functions.logger.warn("Gemini fallback triggered (timeout)", {
-          conversationId: conversationIdForLog,
-          userMessageHash,
+          conversationId: conv ? conv.id : null,
+          userMessageHash: shortHash(messageBody),
           geminiLatencyMs: latencyMs,
           triggeredFallback: true,
-          intermediateSent,
         });
         // Persist the user message with no assistant reply so the next
         // exchange has context (UX degradation: user must re-prompt).
-        // Future improvement tracked in debt 0009.
+        // Future improvement tracked in docs/debt/0009-fallback-message-recovery.md.
         const nowIso = new Date().toISOString();
         const messagesWithUser = [
           ...existingMessages,
@@ -1072,29 +909,15 @@ async function processAndRespond(body) {
             saveErr,
           );
         }
-        await sendWhatsAppMessage({
-          toPhone: phone,
-          body: SOFT_FALLBACK_REPLY,
-          conversationId: conversationIdForLog,
-          petId,
-          userMessageHash,
-        });
-        return;
+        return res.status(200).send(twiml(FALLBACK_REPLY));
       }
       functions.logger.error("Gemini error", err);
-      // Don't persist a failed exchange — just notify the user softly.
-      await sendWhatsAppMessage({
-        toPhone: phone,
-        body: SOFT_FALLBACK_REPLY,
-        conversationId: conversationIdForLog,
-        petId,
-        userMessageHash,
-      });
-      return;
+      reply =
+        "Disculpa, estoy teniendo problemas técnicos. Intenta de nuevo en unos minutos.";
+      // Still return the reply — don't persist a failed exchange.
+      return res.status(200).send(twiml(reply));
     } finally {
-      geminiDone = true;
-      clearTimeout(hardTimeoutHandle);
-      clearTimeout(intermediateTimerHandle);
+      clearTimeout(timeoutHandle);
     }
 
     // Append new messages.
@@ -1111,27 +934,29 @@ async function processAndRespond(body) {
       updatedMessages.length >= SUMMARY_INTERVAL &&
       updatedMessages.length % SUMMARY_INTERVAL < 2;
 
+    // Trim if over limit.
     let finalMessages = updatedMessages;
     if (updatedMessages.length > MAX_MESSAGES) {
+      // Generate summary before trimming so we capture the old messages.
       if (model) {
         summary = await generateSummary(model, pet, updatedMessages);
       }
+      // Keep last MAX_MESSAGES messages.
       finalMessages = updatedMessages.slice(-MAX_MESSAGES);
     } else if (shouldSummarize && model) {
       summary = await generateSummary(model, pet, updatedMessages);
     }
 
-    // Persist conversation. Note: stored reply is the Gemini output, not
-    // any Capa 2 override — see debt 0013 for the rationale.
+    // Persist conversation (fire-and-forget for speed, but await to be safe).
     const conversationId = await saveConversation(
       conv ? conv.id : null,
       phone,
       petId,
       finalMessages,
-      summary,
+      summary
     );
 
-    // Smart extraction pipeline in background (don't block delivery).
+    // Smart extraction pipeline in background (don't block response).
     if (model) {
       extractHealthData(
         model,
@@ -1141,12 +966,12 @@ async function processAndRespond(body) {
         petId,
         conversationId,
       ).catch((err) =>
-        functions.logger.error("Extraction pipeline background error", err),
+        functions.logger.error("Extraction pipeline background error", err)
       );
     }
 
     // ── Capa 2: post-response safety classifier ─────────────────────
-    // Awaited (blocks final delivery). Fail-open: on timeout/error the
+    // Awaited (blocks TwiML response). Fail-open: on timeout/error the
     // original `reply` is sent through unchanged. Persist of the
     // classification record is fire-and-forget.
     let finalReply = reply;
@@ -1162,7 +987,7 @@ async function processAndRespond(body) {
         .add({
           petId,
           conversationId: conversationId || null,
-          userMessageHash,
+          userMessageHash: shortHash(messageBody),
           category: classification.category,
           confidence: classification.confidence,
           reasoning: classification.reasoning,
@@ -1186,94 +1011,28 @@ async function processAndRespond(body) {
           category: classification.category,
           confidence: classification.confidence,
           classifierLatencyMs: classification.latencyMs,
-          intermediateSent,
         });
       }
     }
 
-    await sendWhatsAppMessage({
-      toPhone: phone,
-      body: finalReply,
-      conversationId,
-      petId,
-      userMessageHash,
-    });
+    return res.status(200).send(twiml(finalReply));
   } catch (err) {
-    functions.logger.error("processAndRespond top-level error", {
-      err: err && err.message ? err.message : String(err),
-      stack: err && err.stack ? err.stack.slice(0, 1000) : null,
-    });
-    if (phone) {
-      // Best-effort soft fallback. sendWhatsAppMessage swallows its own
-      // errors, so this resolves regardless.
-      await sendWhatsAppMessage({
-        toPhone: phone,
-        body: SOFT_FALLBACK_REPLY,
-        userMessageHash,
-      });
-    }
+    functions.logger.error("Webhook error", err);
+    return res
+      .status(200)
+      .send(
+        twiml(
+          "Disculpa, estoy teniendo problemas técnicos. Intenta de nuevo en unos minutos."
+        )
+      );
   }
-}
-
-exports.whatsappWebhook = functions
-  .runWith({
-    secrets: [
-      GEMINI_API_KEY,
-      TWILIO_ACCOUNT_SID,
-      TWILIO_AUTH_TOKEN,
-      TWILIO_FROM_NUMBER,
-    ],
-  })
-  .https.onRequest(async (req, res) => {
-    res.set("Content-Type", "text/xml");
-
-    let body;
-    try {
-      body = req.body;
-      if (typeof body === "string") {
-        body = Object.fromEntries(new URLSearchParams(body));
-      } else if (Buffer.isBuffer(body)) {
-        body = Object.fromEntries(new URLSearchParams(body.toString("utf8")));
-      }
-      body = body || {};
-    } catch (parseErr) {
-      functions.logger.error("Webhook body parse failed", parseErr);
-      return res.status(200).send(EMPTY_TWIML_RESPONSE);
-    }
-
-    const from = body.From;
-    const messageBody = body.Body;
-
-    if (!from || !messageBody) {
-      functions.logger.warn("Missing From or Body", {
-        hasFrom: !!from,
-        hasBody: !!messageBody,
-      });
-      return res.status(200).send(EMPTY_TWIML_RESPONSE);
-    }
-
-    // Ack-fast: flush 200 OK + empty <Response/> immediately so Twilio
-    // closes its end of the webhook within ~100–500ms. We then continue
-    // processing inside the same handler; awaiting keeps the function
-    // instance alive until processAndRespond resolves (Gen-1 only reaps
-    // after the handler returns). See header note on pattern choice.
-    res.status(200).send(EMPTY_TWIML_RESPONSE);
-
-    try {
-      await processAndRespond(body);
-    } catch (err) {
-      // processAndRespond has its own top-level catch, but we keep this
-      // outer guard so an unexpected throw never crashes the function.
-      functions.logger.error("Webhook handler unhandled error", err);
-    }
-  });
+});
 
 // ── Twilio status callback ──────────────────────────────────────────
 // Receives delivery state transitions (queued, sent, delivered, failed,
-// undelivered, read) for outbound messages sent via messages.create.
-// Minimal logic: parse, persist, ack. Always returns 200 — Twilio retries
-// non-2xx and we don't want callback failures to compound into webhook
-// noise.
+// undelivered, read) for messages we returned via TwiML. Minimal logic:
+// parse, persist, ack. Always returns 200 — Twilio retries non-2xx and we
+// don't want callback failures to compound into webhook noise.
 
 exports.twilioStatusCallback = functions.https.onRequest(async (req, res) => {
   try {
