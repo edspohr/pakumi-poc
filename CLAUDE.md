@@ -91,6 +91,18 @@ There are **two** Firestore collections holding pet data, and this split is load
 
 The WhatsApp webhook and the web app share Firestore but are otherwise independent. Don't couple them.
 
+### WhatsApp webhook async response pattern
+
+The webhook does **not** return TwiML message bodies. Inbound flow:
+
+1. Twilio POST → handler parses body, validates `From`/`Body`.
+2. Handler responds 200 OK with empty `<Response/>` immediately.
+3. Same handler then awaits `processAndRespond()` which runs the full pipeline (Capa 3 → Gemini main → Capa 2 → reply delivery via `twilioClient.messages.create`).
+
+This decouples Gemini latency from Twilio's 15s webhook timeout. If Gemini takes >5s, an intermediate "Estoy procesando tu consulta..." message is sent via `messages.create` while the agent finishes thinking. Suppressed for the Capa 3 regex-preempt path; not suppressed for Capa 2 emergency overrides (the override happens after Gemini returns, so the intermediate may have already fired). See `docs/debt/0017-twilio-async-pattern.md` for the migration rationale and trade-offs.
+
+Why **await-after-send**, not detached fire-and-forget: Cloud Functions Gen-1 may reap the instance once the handler returns; detached promises started after `res.send()` can be silently dropped. Awaiting inside the handler keeps the instance alive while still flushing the ack first.
+
 ### Security rules: deny-by-default
 
 `firestore.rules` ends with a catch-all `match /{document=**} { allow read, write: if false; }`. Any new collection needs an explicit `match` block above that line or all access fails silently in the client. When adding a collection, update the rules in the same change.
