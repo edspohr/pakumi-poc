@@ -13,8 +13,8 @@
  *   - Capa 2 safety classifier (a second Gemini call, post-reply): ≤3s
  *   - TwiML serialization + response: <100ms
  *
- * The main reply call is capped at GEMINI_REPLY_TIMEOUT_MS (8s) and the
- * classifier at CLASSIFIER_TIMEOUT_MS (3s), both via AbortController +
+ * The main reply call is capped at GEMINI_REPLY_TIMEOUT_MS (12s) and the
+ * classifier at CLASSIFIER_TIMEOUT_MS (2.5s), both via AbortController +
  * Promise.race. On main-reply timeout we return FALLBACK_REPLY (Spanish,
  * mentions vet for emergencies) and persist the user's incoming message
  * so the next exchange retains context (assistant turn left empty).
@@ -22,7 +22,7 @@
  * Multi-layer safety architecture:
  *   - Capa 1: system prompt with veterinary safety section (see SYSTEM_PROMPT).
  *   - Capa 2: post-response LLM classifier with override on emergency.
- *     Timeout: 3s, fail-open with structured logging.
+ *     Timeout: 2.5s, fail-open with structured logging.
  *   - Capa 3 (this file + safety/emergency-patterns.js): regex preempt for
  *     unambiguous emergency phrasings. Skips agent + classifier, responds
  *     instantly. Ultra-conservative — 7 patterns only; false positives
@@ -66,8 +66,8 @@ admin.initializeApp();
 const db = admin.firestore();
 
 // ── Timeout / fallback budget (see header comment) ──────────────────
-const GEMINI_REPLY_TIMEOUT_MS = 8000;
-const CLASSIFIER_TIMEOUT_MS = 3000; // Capa 2 classifier timeout (fail-open)
+const GEMINI_REPLY_TIMEOUT_MS = 12000;
+const CLASSIFIER_TIMEOUT_MS = 2500; // Capa 2 classifier timeout (fail-open)
 const FALLBACK_REPLY =
   "Estoy procesando tu consulta, dame un momento más y te respondo en breve. Si es una emergencia, contacta directamente a tu veterinario.";
 
