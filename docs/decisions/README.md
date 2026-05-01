@@ -13,6 +13,7 @@ and negative), and the alternatives considered. ADRs are immutable once
 | ID  | Title                                          | Status   | Date       |
 | --- | ---------------------------------------------- | -------- | ---------- |
 | 001 | [Pakumi Platform — Stack & Infrastructure Choices](./ADR-001-pakumi-platform.md) | Accepted | 2026-04-25 |
+| 002 | [Cloud Tasks for Asynchronous Webhook Processing](./ADR-002-cloud-tasks-webhook.md) | Proposed | 2026-05-01 |
 
 ## Conventions
 
