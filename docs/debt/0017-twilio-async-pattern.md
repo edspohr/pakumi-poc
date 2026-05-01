@@ -2,7 +2,7 @@
 
 | Field        | Value                              |
 | ------------ | ---------------------------------- |
-| **Status**   | implemented                        |
+| **Status**   | FAILED IN PRODUCTION — REVERTED    |
 | **Priority** | high                               |
 | **Detected** | 2026-04-30                         |
 | **Resolved** | 2026-04-30                         |
@@ -162,6 +162,10 @@ On final retry failure: log structured with `conversationId`,
 Twilio error code, and message. Do **not** throw further — the
 function ack already happened and there is no caller able to act on
 the failure.
+
+## Failure analysis
+
+The await-after-send pattern completely failed in production. Cloud Functions Gen-1 empirically freezes CPU allocation the instant the HTTP response is sent via `res.send()`. The awaited promise does not keep the instance alive; rather, execution halts abruptly. The promise only resumes if and when a subsequent webhook request happens to hit the exact same container instance. This resulted in delayed, massively out-of-order message deliveries (delivered hours later, bunched together), or complete message loss if the frozen container was reaped.
 
 ## Trade-offs and out-of-scope items
 

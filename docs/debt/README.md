@@ -50,7 +50,8 @@ in `git log` without digging through a monolithic document.
 | 0014 | [Regex preempt: tolerated false positives](./0014-regex-preempt-tolerated-false-positives.md) | open     | low      | 2026-04-25 | —          | Edmundo Spohr | precision/safety |
 | 0015 | [Disclaimer flow reintegration](./0015-disclaimer-reintegration.md) | open | medium | 2026-04-26 | — | Edmundo Spohr | compliance/frontend |
 | 0016 | [Gemini timeout tuning under sustained load](./0016-gemini-timeout-tuning.md) | partially-mitigated | medium | 2026-04-30 | — | Edmundo Spohr | backend/performance |
-| 0017 | [Twilio async response pattern (messages.create)](./0017-twilio-async-pattern.md) | implemented | high | 2026-04-30 | 2026-04-30 | Edmundo Spohr | backend/architecture |
+| 0017 | [Twilio async response pattern (messages.create)](./0017-twilio-async-pattern.md) | reverted | high | 2026-04-30 | 2026-04-30 | Edmundo Spohr | backend/architecture |
+| 0018 | [Cloud Tasks migration](./0018-cloud-tasks-migration.md) | open | high | 2026-05-01 | — | Edmundo Spohr | backend/architecture |
 
 ## Notes
 
