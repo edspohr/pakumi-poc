@@ -61,10 +61,6 @@ const crypto = require("crypto");
 const { defineString, defineSecret } = require("firebase-functions/params");
 const { matchEmergencyPattern } = require("./safety/emergency-patterns");
 const { getEmergencyTemplate } = require("./safety/emergency-templates");
-const { CloudTasksClient } = require("@google-cloud/tasks");
-const twilio = require("twilio");
-
-const tasksClient = new CloudTasksClient();
 const PROJECT_ID = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
 const LOCATION_ID = "us-central1";
 const QUEUE_NAME = "whatsapp-processing-queue";
@@ -126,9 +122,19 @@ function getTwilioClient() {
     const sid = TWILIO_ACCOUNT_SID.value();
     const token = TWILIO_AUTH_TOKEN.value();
     if (!sid || !token) throw new Error("TWILIO credentials are not set");
+    const twilio = require("twilio");
     _twilioClient = twilio(sid, token);
   }
   return _twilioClient;
+}
+
+let _tasksClient = null;
+function getTasksClient() {
+  if (!_tasksClient) {
+    const { CloudTasksClient } = require("@google-cloud/tasks");
+    _tasksClient = new CloudTasksClient();
+  }
+  return _tasksClient;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -755,7 +761,8 @@ exports.whatsappWebhook = functions
     const project = PROJECT_ID;
     if (!project) throw new Error("PROJECT_ID is not set");
 
-    const parent = tasksClient.queuePath(project, LOCATION_ID, QUEUE_NAME);
+    const client = getTasksClient();
+    const parent = client.queuePath(project, LOCATION_ID, QUEUE_NAME);
     const url = `https://${LOCATION_ID}-${project}.cloudfunctions.net/processWhatsAppTask`;
 
     const task = {
@@ -769,7 +776,7 @@ exports.whatsappWebhook = functions
       },
     };
 
-    await tasksClient.createTask({ parent, task });
+    await client.createTask({ parent, task });
     
     return res.status(200).send("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response></Response>");
   } catch (err) {
