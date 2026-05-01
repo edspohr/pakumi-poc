@@ -2,10 +2,10 @@
 
 | Field         | Value                                              |
 | ------------- | -------------------------------------------------- |
-| **Status**    | open                                               |
+| **Status**    | resolved                                           |
 | **Priority**  | high                                               |
 | **Detected**  | 2026-05-01                                         |
-| **Resolved**  | —                                                  |
+| **Resolved**  | 2026-05-01                                         |
 | **Owner**     | Edmundo Spohr                                      |
 | **Category**  | backend / architecture                             |
 
@@ -26,3 +26,7 @@ Migrate the background processing to **Cloud Tasks**. This approach is structura
 ## References
 
 - Related debt: `docs/debt/0017-twilio-async-pattern.md` (the reverted attempt)
+
+## History
+
+- **2026-05-01** — Implemented the queue worker, refactored the webhook to enqueue payloads using `@google-cloud/tasks`, and added idempotency checks in Firestore. Resolved.

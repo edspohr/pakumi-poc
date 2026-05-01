@@ -61,6 +61,13 @@ const crypto = require("crypto");
 const { defineString, defineSecret } = require("firebase-functions/params");
 const { matchEmergencyPattern } = require("./safety/emergency-patterns");
 const { getEmergencyTemplate } = require("./safety/emergency-templates");
+const { CloudTasksClient } = require("@google-cloud/tasks");
+const twilio = require("twilio");
+
+const tasksClient = new CloudTasksClient();
+const PROJECT_ID = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
+const LOCATION_ID = "us-central1";
+const QUEUE_NAME = "whatsapp-processing-queue";
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -91,6 +98,8 @@ const TWILIO_STATUS_CALLBACK_URL = defineString("TWILIO_STATUS_CALLBACK_URL", {
 // Secret: resolved at runtime from Secret Manager. Must be bound to each
 // function that consumes it via runWith({ secrets: [...] }).
 const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
+const TWILIO_ACCOUNT_SID = defineSecret("TWILIO_ACCOUNT_SID");
+const TWILIO_AUTH_TOKEN = defineSecret("TWILIO_AUTH_TOKEN");
 
 // ── Lazy-loaded dependencies ────────────────────────────────────────
 // @google/generative-ai is heavy at require() time. Defer to first
@@ -109,6 +118,17 @@ function getGenAI() {
 
 function getGeminiModel() {
   return getGenAI().getGenerativeModel({ model: "gemini-2.5-flash" });
+}
+
+let _twilioClient = null;
+function getTwilioClient() {
+  if (!_twilioClient) {
+    const sid = TWILIO_ACCOUNT_SID.value();
+    const token = TWILIO_AUTH_TOKEN.value();
+    if (!sid || !token) throw new Error("TWILIO credentials are not set");
+    _twilioClient = twilio(sid, token);
+  }
+  return _twilioClient;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -712,7 +732,6 @@ const MAX_MESSAGES = 20;
 const SUMMARY_INTERVAL = 10;
 
 exports.whatsappWebhook = functions
-  .runWith({ secrets: [GEMINI_API_KEY] })
   .https.onRequest(async (req, res) => {
   res.set("Content-Type", "text/xml");
 
@@ -729,22 +748,61 @@ exports.whatsappWebhook = functions
     const messageBody = body.Body;
 
     if (!from || !messageBody) {
-      functions.logger.warn("Missing From or Body", {
-        hasFrom: !!from,
-        hasBody: !!messageBody,
-      });
-      return res
-        .status(200)
-        .send(twiml("No recibimos tu mensaje correctamente. Intenta de nuevo."));
+      functions.logger.warn("Missing From or Body");
+      return res.status(200).send(twiml("No recibimos tu mensaje correctamente. Intenta de nuevo."));
+    }
+
+    const project = PROJECT_ID;
+    if (!project) throw new Error("PROJECT_ID is not set");
+
+    const parent = tasksClient.queuePath(project, LOCATION_ID, QUEUE_NAME);
+    const url = `https://${LOCATION_ID}-${project}.cloudfunctions.net/processWhatsAppTask`;
+
+    const task = {
+      httpRequest: {
+        httpMethod: "POST",
+        url,
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: Buffer.from(JSON.stringify(body)).toString("base64"),
+      },
+    };
+
+    await tasksClient.createTask({ parent, task });
+    
+    return res.status(200).send("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response></Response>");
+  } catch (err) {
+    functions.logger.error("Webhook enqueue error", err);
+    return res.status(200).send("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response></Response>");
+  }
+});
+
+exports.processWhatsAppTask = functions
+  .runWith({ secrets: [GEMINI_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN] })
+  .https.onRequest(async (req, res) => {
+  try {
+    const body = req.body || {};
+    const from = body.From;
+    const to = body.To;
+    const messageBody = body.Body;
+    const messageSid = body.MessageSid;
+
+    if (!from || !messageBody || !to || !messageSid) {
+      return res.status(200).send("ok");
     }
 
     const phone = extractPhone(from);
-    functions.logger.info("Incoming WhatsApp", {
-      phone,
-      profileName: body.ProfileName,
-    });
 
-    // Find the pet for this phone number.
+    // Idempotency check
+    const idempotencyRef = db.collection("processed_webhooks").doc(messageSid);
+    const idempotencyDoc = await idempotencyRef.get();
+    if (idempotencyDoc.exists) {
+      functions.logger.info("Idempotency hit, skipping duplicate", { messageSid });
+      return res.status(200).send("ok");
+    }
+    await idempotencyRef.set({ status: "processing", receivedAt: admin.firestore.FieldValue.serverTimestamp() });
+
     const petSnap = await db
       .collection("pets")
       .where("ownerPhone", "==", phone)
@@ -752,175 +810,101 @@ exports.whatsappWebhook = functions
       .get();
 
     if (petSnap.empty) {
-      return res
-        .status(200)
-        .send(
-          twiml(
-            "No encontramos una mascota registrada con este número. Regístrate en pakumi-poc.web.app para comenzar."
-          )
-        );
+      await sendWhatsAppMessageWithRetry(to, from, "No encontramos una mascota registrada con este número. Regístrate en pakumi-poc.web.app para comenzar.", null, null);
+      await idempotencyRef.set({ status: "done", completedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return res.status(200).send("ok");
     }
 
     const petDoc = petSnap.docs[0];
     const pet = petDoc.data();
     const petId = petDoc.id;
 
-    // Load existing conversation.
     const conv = await getConversation(phone, petId);
     const existingMessages = conv ? conv.messages || [] : [];
     const existingSummary = conv ? conv.summary || "" : "";
     const isFirstMessage = existingMessages.length === 0;
 
-    // Build history: last 5 pairs (10 messages).
     const history = getLastNPairs(existingMessages, 5);
 
-    // ── Capa 3: regex preempt ────────────────────────────────────────
-    // For unambiguous emergency phrasings, skip the agent + classifier and
-    // respond immediately with the emergency template. See
-    // functions/safety/emergency-patterns.js for the pattern list and
-    // design rationale (ultra-conservative, FPs unacceptable).
+    // Capa 3: regex preempt
     const regexMatch = matchEmergencyPattern(messageBody);
     if (regexMatch) {
-      functions.logger.info("safety.preempt_regex_hit", {
+      functions.logger.info("safety.preempt_regex_hit", { petId, category: regexMatch.category });
+      
+      db.collection("safety_classifications").add({
         petId,
         conversationId: conv ? conv.id : null,
-        category: regexMatch.category,
-        matchedPattern: regexMatch.matchedPattern,
         userMessageHash: shortHash(messageBody),
-      });
+        category: regexMatch.category,
+        confidence: "high",
+        reasoning: `regex preempt: ${regexMatch.description}`,
+        classifierStatus: "preempt_regex",
+        classifierLatencyMs: 0,
+        overrideTriggered: true,
+        receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(err => functions.logger.warn("safety_classification.persist_failed", { err: err && err.message ? err.message : String(err) }));
 
-      // Persist to safety_classifications for unified audit trail.
-      // Fire-and-forget; the user-facing response must not wait on this.
-      db.collection("safety_classifications")
-        .add({
-          petId,
-          conversationId: conv ? conv.id : null,
-          userMessageHash: shortHash(messageBody),
-          category: regexMatch.category,
-          confidence: "high",
-          reasoning: `regex preempt: ${regexMatch.description}`,
-          classifierStatus: "preempt_regex",
-          classifierLatencyMs: 0,
-          overrideTriggered: true,
-          receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-        })
-        .catch((err) =>
-          functions.logger.warn("safety_classification.persist_failed", {
-            err: err && err.message ? err.message : String(err),
-          }),
-        );
-
-      // Save user message + placeholder assistant turn so future context
-      // reflects what actually happened. Fire-and-forget per spec; the
-      // next message arriving within milliseconds may not see this turn,
-      // which is acceptable given the rarity of the preempt path.
       const preemptIso = new Date().toISOString();
-      const placeholder =
-        "[Pakumi: derivó a urgencia veterinaria por regex preempt]";
+      const placeholder = "[Pakumi: derivó a urgencia veterinaria por regex preempt]";
       const messagesWithPreempt = [
         ...existingMessages,
         { role: "user", content: messageBody, timestamp: preemptIso },
         { role: "assistant", content: placeholder, timestamp: preemptIso },
       ];
-      saveConversation(
-        conv ? conv.id : null,
-        phone,
-        petId,
-        messagesWithPreempt,
-        existingSummary,
-      ).catch((err) =>
-        functions.logger.error("conversation.save_failed_after_preempt", {
-          err: err && err.message ? err.message : String(err),
-        }),
-      );
+      saveConversation(conv ? conv.id : null, phone, petId, messagesWithPreempt, existingSummary)
+        .catch(err => functions.logger.error("conversation.save_failed_after_preempt", { err: err && err.message ? err.message : String(err) }));
 
-      // Send emergency template and return — no Gemini calls beyond this.
-      return res
-        .status(200)
-        .send(twiml(getEmergencyTemplate(regexMatch.category)));
+      await sendWhatsAppMessageWithRetry(to, from, getEmergencyTemplate(regexMatch.category), petId, conv ? conv.id : null);
+      await idempotencyRef.set({ status: "done", completedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return res.status(200).send("ok");
     }
-    // ─── End Capa 3 ──────────────────────────────────────────────────
 
-    // Call Gemini with conversation context, capped at GEMINI_REPLY_TIMEOUT_MS.
+    // Intermediate message
+    let intermediateSent = false;
+    const intermediateTimeout = setTimeout(() => {
+      intermediateSent = true;
+      sendWhatsAppMessageWithRetry(to, from, "Estoy procesando tu consulta, dame un momento más y te respondo en breve...", petId, conv ? conv.id : null)
+        .catch(e => functions.logger.error("Failed to send intermediate", e));
+    }, 5000);
+
     let reply;
     let model;
     const geminiStartedAt = Date.now();
     const controller = new AbortController();
-    const timeoutHandle = setTimeout(
-      () => controller.abort(),
-      GEMINI_REPLY_TIMEOUT_MS,
-    );
+    const timeoutHandle = setTimeout(() => controller.abort(), GEMINI_REPLY_TIMEOUT_MS);
+    
     try {
       model = getGeminiModel();
-      const prompt = buildConversationPrompt(
-        pet,
-        history,
-        existingSummary,
-        messageBody,
-        isFirstMessage,
-      );
-      // Belt and suspenders: pass signal to the SDK (best-effort cancel of
-      // the underlying fetch) AND race against a manual timeout so we are
-      // guaranteed to free our promise inside the budget regardless of SDK
-      // behavior.
-      const generatePromise = model.generateContent(prompt, {
-        signal: controller.signal,
-      });
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(
-          () => reject(new Error("GEMINI_TIMEOUT")),
-          GEMINI_REPLY_TIMEOUT_MS,
-        ),
-      );
+      const prompt = buildConversationPrompt(pet, history, existingSummary, messageBody, isFirstMessage);
+      const generatePromise = model.generateContent(prompt, { signal: controller.signal });
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("GEMINI_TIMEOUT")), GEMINI_REPLY_TIMEOUT_MS));
       const result = await Promise.race([generatePromise, timeoutPromise]);
       reply = result.response.text();
       if (!reply || !reply.trim()) throw new Error("Empty Gemini response");
     } catch (err) {
       controller.abort();
-      const isTimeout =
-        err && (err.message === "GEMINI_TIMEOUT" || err.name === "AbortError");
+      clearTimeout(intermediateTimeout);
+      const isTimeout = err && (err.message === "GEMINI_TIMEOUT" || err.name === "AbortError");
       if (isTimeout) {
-        const latencyMs = Date.now() - geminiStartedAt;
-        functions.logger.warn("Gemini fallback triggered (timeout)", {
-          conversationId: conv ? conv.id : null,
-          userMessageHash: shortHash(messageBody),
-          geminiLatencyMs: latencyMs,
-          triggeredFallback: true,
-        });
-        // Persist the user message with no assistant reply so the next
-        // exchange has context (UX degradation: user must re-prompt).
-        // Future improvement tracked in docs/debt/0009-fallback-message-recovery.md.
+        functions.logger.warn("Gemini fallback triggered (timeout)", { petId });
         const nowIso = new Date().toISOString();
-        const messagesWithUser = [
-          ...existingMessages,
-          { role: "user", content: messageBody, timestamp: nowIso },
-        ];
-        try {
-          await saveConversation(
-            conv ? conv.id : null,
-            phone,
-            petId,
-            messagesWithUser,
-            existingSummary,
-          );
-        } catch (saveErr) {
-          functions.logger.error(
-            "saveConversation failed during fallback",
-            saveErr,
-          );
-        }
-        return res.status(200).send(twiml(FALLBACK_REPLY));
+        const messagesWithUser = [...existingMessages, { role: "user", content: messageBody, timestamp: nowIso }];
+        await saveConversation(conv ? conv.id : null, phone, petId, messagesWithUser, existingSummary).catch(e => {});
+        await sendWhatsAppMessageWithRetry(to, from, FALLBACK_REPLY, petId, conv ? conv.id : null);
+        await idempotencyRef.set({ status: "done", completedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return res.status(200).send("ok");
       }
       functions.logger.error("Gemini error", err);
-      reply =
-        "Disculpa, estoy teniendo problemas técnicos. Intenta de nuevo en unos minutos.";
-      // Still return the reply — don't persist a failed exchange.
-      return res.status(200).send(twiml(reply));
+      reply = "Disculpa, estoy teniendo problemas técnicos. Intenta de nuevo en unos minutos.";
+      await sendWhatsAppMessageWithRetry(to, from, reply, petId, conv ? conv.id : null);
+      await idempotencyRef.set({ status: "done", completedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return res.status(200).send("ok");
     } finally {
       clearTimeout(timeoutHandle);
     }
 
-    // Append new messages.
+    clearTimeout(intermediateTimeout);
+
     const now = new Date().toISOString();
     const updatedMessages = [
       ...existingMessages,
@@ -928,103 +912,49 @@ exports.whatsappWebhook = functions
       { role: "assistant", content: reply, timestamp: now },
     ];
 
-    // Summary: regenerate every SUMMARY_INTERVAL messages or when trimming.
     let summary = existingSummary;
-    const shouldSummarize =
-      updatedMessages.length >= SUMMARY_INTERVAL &&
-      updatedMessages.length % SUMMARY_INTERVAL < 2;
+    const shouldSummarize = updatedMessages.length >= SUMMARY_INTERVAL && updatedMessages.length % SUMMARY_INTERVAL < 2;
 
-    // Trim if over limit.
     let finalMessages = updatedMessages;
     if (updatedMessages.length > MAX_MESSAGES) {
-      // Generate summary before trimming so we capture the old messages.
-      if (model) {
-        summary = await generateSummary(model, pet, updatedMessages);
-      }
-      // Keep last MAX_MESSAGES messages.
+      if (model) summary = await generateSummary(model, pet, updatedMessages);
       finalMessages = updatedMessages.slice(-MAX_MESSAGES);
     } else if (shouldSummarize && model) {
       summary = await generateSummary(model, pet, updatedMessages);
     }
 
-    // Persist conversation (fire-and-forget for speed, but await to be safe).
-    const conversationId = await saveConversation(
-      conv ? conv.id : null,
-      phone,
-      petId,
-      finalMessages,
-      summary
-    );
+    const conversationId = await saveConversation(conv ? conv.id : null, phone, petId, finalMessages, summary);
 
-    // Smart extraction pipeline in background (don't block response).
     if (model) {
-      extractHealthData(
-        model,
-        pet,
-        messageBody,
-        reply,
-        petId,
-        conversationId,
-      ).catch((err) =>
-        functions.logger.error("Extraction pipeline background error", err)
-      );
+      extractHealthData(model, pet, messageBody, reply, petId, conversationId).catch(err => functions.logger.error("Extraction pipeline background error", err));
     }
 
-    // ── Capa 2: post-response safety classifier ─────────────────────
-    // Awaited (blocks TwiML response). Fail-open: on timeout/error the
-    // original `reply` is sent through unchanged. Persist of the
-    // classification record is fire-and-forget.
+    // Capa 2
     let finalReply = reply;
     if (model) {
-      const classification = await classifyEmergency(
-        model,
-        messageBody,
-        conversationId,
-        petId,
-      );
-
-      db.collection("safety_classifications")
-        .add({
-          petId,
-          conversationId: conversationId || null,
-          userMessageHash: shortHash(messageBody),
-          category: classification.category,
-          confidence: classification.confidence,
-          reasoning: classification.reasoning,
-          classifierStatus: classification.status,
-          classifierLatencyMs: classification.latencyMs,
-          overrideTriggered:
-            classification.category.startsWith("EMERGENCIA_"),
-          receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-        })
-        .catch((err) =>
-          functions.logger.warn("safety_classification.persist_failed", {
-            err: err && err.message ? err.message : String(err),
-          }),
-        );
+      const classification = await classifyEmergency(model, messageBody, conversationId, petId);
+      db.collection("safety_classifications").add({
+        petId, conversationId: conversationId || null,
+        userMessageHash: shortHash(messageBody),
+        category: classification.category, confidence: classification.confidence,
+        reasoning: classification.reasoning, classifierStatus: classification.status,
+        classifierLatencyMs: classification.latencyMs,
+        overrideTriggered: classification.category.startsWith("EMERGENCIA_"),
+        receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(e => {});
 
       if (classification.category.startsWith("EMERGENCIA_")) {
         finalReply = getEmergencyTemplate(classification.category);
-        functions.logger.info("safety.emergency_override", {
-          petId,
-          conversationId: conversationId || null,
-          category: classification.category,
-          confidence: classification.confidence,
-          classifierLatencyMs: classification.latencyMs,
-        });
+        functions.logger.info("safety.emergency_override", { petId, category: classification.category });
       }
     }
 
-    return res.status(200).send(twiml(finalReply));
+    await sendWhatsAppMessageWithRetry(to, from, finalReply, petId, conversationId);
+    await idempotencyRef.set({ status: "done", completedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return res.status(200).send("ok");
   } catch (err) {
-    functions.logger.error("Webhook error", err);
-    return res
-      .status(200)
-      .send(
-        twiml(
-          "Disculpa, estoy teniendo problemas técnicos. Intenta de nuevo en unos minutos."
-        )
-      );
+    functions.logger.error("Task worker error", err);
+    return res.status(500).send("error");
   }
 });
 

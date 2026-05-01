@@ -51,7 +51,7 @@ in `git log` without digging through a monolithic document.
 | 0015 | [Disclaimer flow reintegration](./0015-disclaimer-reintegration.md) | open | medium | 2026-04-26 | — | Edmundo Spohr | compliance/frontend |
 | 0016 | [Gemini timeout tuning under sustained load](./0016-gemini-timeout-tuning.md) | partially-mitigated | medium | 2026-04-30 | — | Edmundo Spohr | backend/performance |
 | 0017 | [Twilio async response pattern (messages.create)](./0017-twilio-async-pattern.md) | reverted | high | 2026-04-30 | 2026-04-30 | Edmundo Spohr | backend/architecture |
-| 0018 | [Cloud Tasks migration](./0018-cloud-tasks-migration.md) | open | high | 2026-05-01 | — | Edmundo Spohr | backend/architecture |
+| 0018 | [Cloud Tasks migration](./0018-cloud-tasks-migration.md) | resolved | high | 2026-05-01 | 2026-05-01 | Edmundo Spohr | backend/architecture |
 
 ## Notes
 
