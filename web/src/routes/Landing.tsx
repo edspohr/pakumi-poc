@@ -72,7 +72,7 @@ export default function Landing() {
               )}
               <div className="flex -space-x-3 overflow-hidden">
                 {[1, 2, 3, 4].map((i) => (
-                  <div key={i} className="inline-block h-10 w-10 rounded-full ring-4 ring-white bg-gray-100 flex items-center justify-center text-lg border border-gray-100">🐶</div>
+                  <div key={i} className="h-10 w-10 rounded-full ring-4 ring-white bg-gray-100 flex items-center justify-center text-lg border border-gray-100">🐶</div>
                 ))}
                 <div className="flex items-center ml-4 text-sm font-bold text-gray-500 uppercase tracking-wide">
                   +1,000 familias confían
@@ -86,7 +86,7 @@ export default function Landing() {
             <img 
               src="/assets/hero-dog.png" 
               alt="Mascota con placa QR de Pakumi"
-              className="relative w-full rounded-[3rem] shadow-premium border-8 border-white object-cover aspect-[4/5] hover:scale-[1.02] transition-transform duration-500"
+              className="relative w-full rounded-[3rem] shadow-premium border-8 border-white object-cover aspect-4/5 hover:scale-[1.02] transition-transform duration-500"
             />
           </div>
         </div>
@@ -118,7 +118,7 @@ export default function Landing() {
 
       {/* Mockup Section */}
       <section id="how-it-works" className="py-32 bg-brand-dark text-white relative">
-        <div className="absolute top-0 left-0 w-full h-full opacity-10 bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-brand via-transparent to-transparent"></div>
+        <div className="absolute top-0 left-0 w-full h-full opacity-10 bg-[radial-gradient(circle_at_top_right,var(--tw-gradient-stops))] from-brand via-transparent to-transparent"></div>
         <div className="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center gap-20 relative">
           <div className="flex-1 space-y-10">
             <h2 className="text-4xl md:text-6xl font-bold leading-tight tracking-tight">Tu veterinario de bolsillo, siempre disponible.</h2>
@@ -144,7 +144,7 @@ export default function Landing() {
              <img 
               src="/assets/whatsapp-mockup.png" 
               alt="Interfaz de WhatsApp de Pakumi"
-              className="relative w-full max-w-sm mx-auto rounded-[3.5rem] shadow-[0_50px_100px_-20px_rgba(0,0,0,0.5)] border-[12px] border-white/5 hover:scale-105 transition-transform duration-700"
+              className="relative w-full max-w-sm mx-auto rounded-[3.5rem] shadow-[0_50px_100px_-20px_rgba(0,0,0,0.5)] border-12 border-white/5 hover:scale-105 transition-transform duration-700"
             />
           </div>
         </div>
@@ -155,7 +155,7 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="max-w-6xl mx-auto bg-white rounded-[4rem] shadow-premium overflow-hidden border border-gray-100 flex flex-col lg:flex-row items-stretch">
             <div className="flex-1 p-16 md:p-24 bg-brand-light flex flex-col justify-center relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-full h-full bg-[linear-gradient(45deg,transparent_25%,rgba(255,255,255,0.2)_50%,transparent_75%)] bg-[length:250%_250%] animate-[shimmer_5s_infinite_linear]"></div>
+              <div className="absolute top-0 left-0 w-full h-full bg-[linear-gradient(45deg,transparent_25%,rgba(255,255,255,0.2)_50%,transparent_75%)] bg-size-[250%_250%] animate-[shimmer_5s_infinite_linear]"></div>
               <h2 className="text-4xl md:text-6xl font-bold text-gray-900 mb-8 relative">Únete a la familia Pakumi</h2>
               <p className="text-xl text-gray-600 mb-10 relative">Protege a tu mascota hoy mismo. El registro toma menos de 2 minutos y dura para siempre.</p>
               <div className="space-y-6 relative">
