@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { AuthForm } from '../components/AuthForm';
@@ -5,6 +6,7 @@ import { AuthForm } from '../components/AuthForm';
 export default function Landing() {
   const { user, loading, signOut } = useAuth();
   const navigate = useNavigate();
+  const [authMode, setAuthMode] = useState<'register' | 'login'>('register');
 
   if (loading) {
     return (
@@ -13,6 +15,14 @@ export default function Landing() {
       </div>
     );
   }
+
+  const handleJumpToAuth = (mode: 'register' | 'login') => {
+    setAuthMode(mode);
+    const element = document.getElementById('auth');
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth' });
+    }
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-platinum selection:bg-brand/20">
@@ -35,9 +45,20 @@ export default function Landing() {
                 Dashboard
               </Link>
             ) : (
-              <a href="#auth" className="bg-brand text-white px-6 py-2.5 rounded-full text-sm font-bold hover:bg-brand-hover transition shadow-lg shadow-brand/20">
-                Unirme ahora
-              </a>
+              <div className="flex items-center gap-4">
+                <button 
+                  onClick={() => handleJumpToAuth('login')}
+                  className="text-sm font-bold text-gray-700 hover:text-brand transition"
+                >
+                  Iniciar sesión
+                </button>
+                <button 
+                  onClick={() => handleJumpToAuth('register')}
+                  className="bg-brand text-white px-6 py-2.5 rounded-full text-sm font-bold hover:bg-brand-hover transition shadow-lg shadow-brand/20"
+                >
+                  Unirme ahora
+                </button>
+              </div>
             )}
           </nav>
         </div>
@@ -60,17 +81,28 @@ export default function Landing() {
             <p className="text-lg md:text-2xl text-gray-600 max-w-2xl mx-auto lg:mx-0 leading-relaxed">
               Un asistente veterinario con IA en tu WhatsApp y un perfil médico de emergencia que habla por tu mascota cuando ella no puede.
             </p>
-            <div className="flex flex-col sm:flex-row items-center gap-6 justify-center lg:justify-start pt-4">
+            <div className="flex flex-col sm:flex-row items-center gap-4 justify-center lg:justify-start pt-4">
               {!user ? (
-                <a href="#auth" className="w-full sm:w-auto bg-gray-900 text-white px-10 py-5 rounded-2xl text-lg font-bold hover:bg-gray-800 transition shadow-2xl hover:-translate-y-1">
-                  Proteger a mi mascota
-                </a>
+                <>
+                  <button 
+                    onClick={() => handleJumpToAuth('register')}
+                    className="w-full sm:w-auto bg-gray-900 text-white px-10 py-5 rounded-2xl text-lg font-bold hover:bg-gray-800 transition shadow-2xl hover:-translate-y-1"
+                  >
+                    Proteger a mi mascota
+                  </button>
+                  <button 
+                    onClick={() => handleJumpToAuth('login')}
+                    className="w-full sm:w-auto bg-white text-gray-900 border-2 border-gray-100 px-10 py-5 rounded-2xl text-lg font-bold hover:bg-gray-50 transition shadow-lg hover:-translate-y-1"
+                  >
+                    Iniciar sesión
+                  </button>
+                </>
               ) : (
                 <button onClick={() => navigate('/register')} className="w-full sm:w-auto bg-gray-900 text-white px-10 py-5 rounded-2xl text-lg font-bold hover:bg-gray-800 transition shadow-2xl hover:-translate-y-1">
                    Ir a mis mascotas
                 </button>
               )}
-              <div className="flex -space-x-3 overflow-hidden">
+              <div className="flex -space-x-3 overflow-hidden ml-0 lg:ml-6">
                 {[1, 2, 3, 4].map((i) => (
                   <div key={i} className="h-10 w-10 rounded-full ring-4 ring-white bg-gray-100 flex items-center justify-center text-lg border border-gray-100">🐶</div>
                 ))}
@@ -186,10 +218,14 @@ export default function Landing() {
               ) : (
                 <div className="animate-in fade-in slide-in-from-bottom duration-700">
                   <div className="text-center mb-8">
-                    <h3 className="text-2xl font-bold text-gray-900">Crear cuenta</h3>
-                    <p className="text-gray-500">Regístrate en segundos para empezar</p>
+                    <h3 className="text-2xl font-bold text-gray-900">
+                      {authMode === 'register' ? 'Crear cuenta' : 'Iniciar sesión'}
+                    </h3>
+                    <p className="text-gray-500">
+                      {authMode === 'register' ? 'Regístrate en segundos para empezar' : 'Ingresa tus credenciales'}
+                    </p>
                   </div>
-                  <AuthForm />
+                  <AuthForm key={authMode} initialMode={authMode} />
                 </div>
               )}
             </div>

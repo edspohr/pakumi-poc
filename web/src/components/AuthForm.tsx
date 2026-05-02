@@ -25,8 +25,8 @@ function getErrorMessage(err: unknown): string {
   return (code && AUTH_ERRORS_ES[code]) || 'Algo salió mal. Intenta de nuevo.';
 }
 
-export function AuthForm() {
-  const [mode, setMode] = useState<'register' | 'login'>('register');
+export function AuthForm({ initialMode = 'register' }: { initialMode?: 'register' | 'login' }) {
+  const [mode, setMode] = useState<'register' | 'login'>(initialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
