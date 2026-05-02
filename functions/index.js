@@ -165,6 +165,23 @@ function shortHash(s) {
   return crypto.createHash("sha256").update(String(s)).digest("hex").slice(0, 16);
 }
 
+async function sendWhatsAppMessageWithRetry(twilioNumber, userNumber, body, petId, convId, retries = 3) {
+  const client = getTwilioClient();
+  const callbackUrl = TWILIO_STATUS_CALLBACK_URL.value() || "";
+  for (let i = 0; i < retries; i++) {
+    try {
+      const msgOpts = { from: twilioNumber, to: userNumber, body };
+      if (callbackUrl) msgOpts.statusCallback = callbackUrl;
+      await client.messages.create(msgOpts);
+      return;
+    } catch (err) {
+      functions.logger.error(`Twilio send failed (attempt ${i+1}/${retries})`, { err: err && err.message ? err.message : String(err), petId, convId });
+      if (i === retries - 1) throw err;
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+}
+
 // ── Prompt builders ─────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are a friendly, knowledgeable veterinary AI assistant called "Pakumi". You provide helpful guidance about pet health within the limits and rules defined in the '### Seguridad veterinaria' section below.
