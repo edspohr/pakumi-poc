@@ -77,7 +77,7 @@ export function PetSelector({ currentPetId }: PetSelectorProps) {
             <button
               onClick={() => {
                 setOpen(false);
-                navigate('/register');
+                navigate('/register?new=1');
               }}
               className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-brand hover:bg-green-50 transition font-medium"
             >

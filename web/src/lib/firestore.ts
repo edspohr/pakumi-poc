@@ -102,6 +102,37 @@ export async function registerPet(
   return petId;
 }
 
+export async function deletePet(petId: string): Promise<void> {
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'pets', petId));
+  batch.delete(doc(db, 'emergency_profiles', petId));
+  await batch.commit();
+}
+
+export async function updatePet(
+  petId: string,
+  petData: Partial<Pet>
+): Promise<void> {
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'pets', petId), { ...petData, updatedAt: serverTimestamp() });
+  
+  const emergencyUpdate: Partial<EmergencyProfile> = {};
+  if (petData.userId !== undefined) emergencyUpdate.userId = petData.userId;
+  if (petData.name !== undefined) emergencyUpdate.name = petData.name;
+  if (petData.species !== undefined) emergencyUpdate.species = petData.species;
+  if (petData.age !== undefined) emergencyUpdate.age = petData.age;
+  if (petData.condition !== undefined) emergencyUpdate.condition = petData.condition;
+  if (petData.ownerPhone !== undefined) emergencyUpdate.ownerPhone = petData.ownerPhone;
+  if (petData.ownerName !== undefined) emergencyUpdate.ownerName = petData.ownerName;
+
+  if (Object.keys(emergencyUpdate).length > 0) {
+    batch.update(doc(db, 'emergency_profiles', petId), emergencyUpdate);
+  }
+  
+  await batch.commit();
+}
+
+
 // ── Health events ──────────────────────────────────────────────────
 
 export async function getHealthEvents(petId: string): Promise<HealthEvent[]> {

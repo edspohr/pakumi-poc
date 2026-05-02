@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { ensureUserProfile, registerPet } from '../lib/firestore';
+import { ensureUserProfile, registerPet, updatePet } from '../lib/firestore';
 import type { Pet } from '../types';
 
 const COUNTRY_CODES = [
@@ -48,19 +48,34 @@ export function ageFromBirthDate(iso: string): string {
 const INPUT_CLS =
   'w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand focus:border-brand';
 
-export function PetForm() {
+interface PetFormProps {
+  initialData?: Pet;
+  onSuccess?: () => void;
+}
+
+export function PetForm({ initialData, onSuccess }: PetFormProps) {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const [name, setName] = useState('');
-  const [species, setSpecies] = useState<Pet['species']>('Perro');
-  const [breed, setBreed] = useState('');
-  const [birthDate, setBirthDate] = useState('');
-  const [weight, setWeight] = useState('');
-  const [condition, setCondition] = useState('');
-  const [ownerName, setOwnerName] = useState(user?.displayName || '');
-  const [countryCode, setCountryCode] = useState('+56');
-  const [phoneLocal, setPhoneLocal] = useState('');
+  const parsedPhone = useMemo(() => {
+    if (!initialData?.ownerPhone) return { code: '+56', local: '' };
+    const phone = initialData.ownerPhone;
+    const match = COUNTRY_CODES.find(c => phone.startsWith(c.code));
+    if (match) {
+      return { code: match.code, local: phone.slice(match.code.length) };
+    }
+    return { code: '+56', local: phone };
+  }, [initialData]);
+
+  const [name, setName] = useState(initialData?.name || '');
+  const [species, setSpecies] = useState<Pet['species']>(initialData?.species || 'Perro');
+  const [breed, setBreed] = useState(initialData?.breed || '');
+  const [birthDate, setBirthDate] = useState(initialData?.birthDate || '');
+  const [weight, setWeight] = useState(initialData?.weight?.toString() || '');
+  const [condition, setCondition] = useState(initialData?.condition || '');
+  const [ownerName, setOwnerName] = useState(initialData?.ownerName || user?.displayName || '');
+  const [countryCode, setCountryCode] = useState(parsedPhone.code);
+  const [phoneLocal, setPhoneLocal] = useState(parsedPhone.local);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -95,9 +110,6 @@ export function PetForm() {
 
     setLoading(true);
     try {
-      // Ensure the user profile doc exists before writing the pet — this is
-      // where we'd previously create it on Landing. Keeps the users/{uid}
-      // doc alive for RBAC and (later) the disclaimer flag.
       await ensureUserProfile(
         user.uid,
         user.email || '',
@@ -105,23 +117,32 @@ export function PetForm() {
       );
 
       const age = ageFromBirthDate(birthDate);
-      const petId = await registerPet({
-        userId: user.uid,
+      const data = {
         name: name.trim(),
         species,
         breed: breed.trim() || undefined,
         birthDate: birthDate || undefined,
         age: age || undefined,
         weight: weightNum,
-        weightUnit: 'kg',
+        weightUnit: 'kg' as const,
         condition: condition.trim() || undefined,
         ownerName: ownerName.trim(),
         ownerPhone: phone,
-      });
-      navigate(`/pet/${petId}`);
+      };
+
+      if (initialData) {
+        await updatePet(initialData.id, data);
+        if (onSuccess) onSuccess();
+      } else {
+        const petId = await registerPet({
+          userId: user.uid,
+          ...data,
+        });
+        navigate(`/pet/${petId}`);
+      }
     } catch (err) {
       console.error(err);
-      setError('No se pudo guardar la mascota. Revisa tu conexión e intenta de nuevo.');
+      setError('No se pudo guardar la información. Revisa tu conexión e intenta de nuevo.');
       setLoading(false);
     }
   }
@@ -292,7 +313,7 @@ export function PetForm() {
         disabled={loading}
         className="w-full bg-brand hover:bg-brand-hover text-white font-medium rounded-lg py-3 transition disabled:opacity-60"
       >
-        {loading ? 'Guardando...' : 'Registrar mascota'}
+        {loading ? 'Guardando...' : (initialData ? 'Guardar cambios' : 'Registrar mascota')}
       </button>
     </form>
   );

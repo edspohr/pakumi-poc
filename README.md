@@ -19,15 +19,17 @@ pakumi/
 │   │   ├── firebase.ts          Firebase modular SDK init
 │   │   ├── index.css            Tailwind v4 theme (brand green, alert red)
 │   │   ├── routes/
-│   │   │   ├── Landing.tsx      Auth + hero + disclaimer gate
+│   │   │   ├── Landing.tsx      Marketing homepage + Auth
 │   │   │   ├── Register.tsx     Pet registration form
-│   │   │   ├── Dashboard.tsx    Pet info + WhatsApp + QR
+│   │   │   ├── Dashboard.tsx    Summary view
+│   │   │   ├── Settings.tsx     Pet edit / delete
 │   │   │   └── Emergency.tsx    Public emergency page (no auth)
 │   │   ├── components/
+│   │   │   ├── DashboardLayout.tsx Sidebar + mobile navigation
 │   │   │   ├── AuthForm.tsx     Google + email/password auth
-│   │   │   ├── PetForm.tsx      Pet registration with date picker + phone
+│   │   │   ├── PetForm.tsx      Pet registration and edit mode
 │   │   │   ├── QRCode.tsx       QR SVG + PNG download
-│   │   │   ├── Layout.tsx       Header, footer, policy link
+│   │   │   ├── Layout.tsx       Shared simple header + sign-out
 │   │   │   └── Disclaimer.tsx   Data protection modal (Ley 29733)
 │   │   ├── hooks/
 │   │   │   ├── useAuth.ts       Firebase auth state
@@ -78,8 +80,9 @@ See [DEPLOY_CHECKLIST.md](DEPLOY_CHECKLIST.md) for the full pre/post-deploy veri
 | Layer    | Tech                                           |
 | -------- | ---------------------------------------------- |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4    |
-| Backend  | Firebase Cloud Functions (Node.js, JavaScript)  |
-| Database | Cloud Firestore                                 |
+| Backend  | Firebase Cloud Functions (Node.js, JavaScript) |
+| Queue    | Google Cloud Tasks (Async webhook processing)  |
+| Database | Cloud Firestore                                |
 | Auth     | Firebase Auth (Google + email/password)          |
 | RBAC     | Firestore-based roles (owner, partner, admin, superadmin) |
 | AI       | Google Gemini via `@google/generative-ai`        |

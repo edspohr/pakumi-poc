@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { getUserPets } from '../lib/firestore';
 import { Layout } from '../components/Layout';
@@ -7,15 +7,18 @@ import { PetForm } from '../components/PetForm';
 
 export default function Register() {
   const { user, loading } = useAuth();
+  const location = useLocation();
+  const isNew = new URLSearchParams(location.search).get('new') === '1';
+
   const petsChecked = useRef(false);
   const [redirectTo, setRedirectTo] = useState<string | null>(null);
-  const [petsLoading, setPetsLoading] = useState(true);
+  const [petsLoading, setPetsLoading] = useState(!isNew);
 
   // Once auth resolves, look up existing pets. If the user already has
   // one, skip the form and route them to that pet's dashboard. Guarded by
   // a ref so this latches exactly once per mount.
   useEffect(() => {
-    if (!user || petsChecked.current) return;
+    if (!user || petsChecked.current || isNew) return;
     petsChecked.current = true;
     getUserPets(user.uid)
       .then((pets) => {
@@ -28,7 +31,7 @@ export default function Register() {
         // Swallow — fall through to the pet form so the user isn't blocked.
       })
       .finally(() => setPetsLoading(false));
-  }, [user]);
+  }, [user, isNew]);
 
   if (loading) {
     return (

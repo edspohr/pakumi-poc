@@ -52,24 +52,20 @@ index.css                    Tailwind v4 theme (brand green, alert red)
 types/index.ts               Pet & EmergencyProfile interfaces
 hooks/useAuth.ts             Auth state hook: { user, loading, signOut }
 lib/firestore.ts             Firestore read/write helpers (getPet, getEmergencyProfile, registerPet)
-routes/Landing.tsx            Auth page → redirects to /register when logged in
-routes/Register.tsx           Pet form → redirects to / when not authed
-routes/Dashboard.tsx          Pet info + WhatsApp + QR → redirects to / when not authed
+routes/Landing.tsx            Marketing homepage + Auth integration
+routes/Register.tsx           Pet form (handles new pet creation)
+routes/Settings.tsx           Pet profile editing and deletion
 routes/Emergency.tsx          Public emergency profile (NO auth required)
-components/AuthForm.tsx       Google + email/password (register/login toggle)
-components/PetForm.tsx        Pet registration with country-code phone picker
+components/DashboardLayout.tsx Shared sidebar + navigation + role guards
+components/PetForm.tsx        Pet registration/editing form (reused)
 components/QRCode.tsx         QR SVG via qrcode.react + PNG download
-components/Layout.tsx         Shared header + sign-out
+components/Layout.tsx         Shared simple header + sign-out
 ```
 
 ### Routing and auth guards
 
 - `/emergency/:petId` is the **only** public route (no auth). All others redirect unauthenticated users to `/`.
 - `firebase.json` has a SPA catch-all rewrite (`** → /index.html`) so that React Router handles all paths. The `/api/whatsapp` function rewrite is listed **before** the catch-all so it still hits the Cloud Function.
-
-## Node version mismatch (known)
-
-`functions/package.json` declares `"engines": { "node": "20" }` but the dev machine runs Node 22. npm prints an `EBADENGINE` warning on install — ignore locally. Before first deploy, either install Node 20 (`nvm use 20`) or bump the engines field to `"22"`. Don't silently change it to match whatever's installed; pick deliberately because it locks the deployed runtime.
 
 ## Architecture — what's non-obvious
 
@@ -87,7 +83,8 @@ There are **two** Firestore collections holding pet data, and this split is load
 1. User signs in at `/` → redirected to `/register` → registers pet → writes `pets/{petId}` + `emergency_profiles/{petId}` (batched) → redirected to `/dashboard/:petId`.
 2. `/dashboard/:petId` shows pet info, WhatsApp instructions, and a QR code linking to `/emergency/:petId`.
 3. Public scanner lands on `/emergency/:petId`, which reads `emergency_profiles/{petId}` directly from Firestore (no auth).
-4. Separately, owner messages a Twilio WhatsApp number → Twilio webhook hits a Cloud Function → function fetches pet context from Firestore, asks Gemini, replies via Twilio.
+4. Separately, owner messages a Twilio WhatsApp number → Twilio webhook hits a Cloud Function. To avoid Twilio's 15s timeout, the webhook enqueues a Google Cloud Task and returns 200 OK immediately.
+5. The background worker (`processWhatsAppTask`) fetches pet context, asks Gemini, extracts structured JSON data, updates subcollections, and asynchronously replies via Twilio.
 
 The WhatsApp webhook and the web app share Firestore but are otherwise independent. Don't couple them.
 
