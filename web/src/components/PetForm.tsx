@@ -23,7 +23,7 @@ function isValidInternationalPhone(phone: string): boolean {
 }
 
 /** Compute a human-readable Spanish age string from an ISO date. */
-export function ageFromBirthDate(iso: string): string {
+function ageFromBirthDate(iso: string): string {
   const birth = new Date(iso + 'T00:00:00');
   if (isNaN(birth.getTime())) return '';
 
@@ -130,7 +130,7 @@ export function PetForm({ initialData, onSuccess }: PetFormProps) {
         ownerPhone: phone,
       };
 
-      if (initialData) {
+      if (initialData && initialData.id) {
         await updatePet(initialData.id, data);
         if (onSuccess) onSuccess();
       } else {
